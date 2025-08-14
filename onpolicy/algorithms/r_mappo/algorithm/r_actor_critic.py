@@ -34,6 +34,11 @@ class R_Actor(nn.Module):
         # base = CNNBase if len(obs_shape) == 3 else MLPBase
         # self.base = base(args, obs_shape)
         self.base = TransformerEncoderBase(args, obs_shape)
+        
+        # Store num_agents for transformer reshaping
+        self.num_agents = getattr(args, 'num_agents', 1)
+        # Auto-detect if using transformer
+        self.use_transformer = isinstance(self.base, TransformerEncoderBase)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -63,7 +68,16 @@ class R_Actor(nn.Module):
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        # Reshape for transformer if needed
+        if self.use_transformer:
+            batch_size = obs.shape[0]
+            # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
+            obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            actor_features = self.base(obs_reshaped)
+            # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
+            actor_features = actor_features.reshape(batch_size, -1)
+        else:
+            actor_features = self.base(obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
@@ -96,7 +110,16 @@ class R_Actor(nn.Module):
         if active_masks is not None:
             active_masks = check(active_masks).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        # Reshape for transformer if needed
+        if self.use_transformer:
+            batch_size = obs.shape[0]
+            # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
+            obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            actor_features = self.base(obs_reshaped)
+            # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
+            actor_features = actor_features.reshape(batch_size, -1)
+        else:
+            actor_features = self.base(obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
@@ -142,6 +165,11 @@ class R_Critic(nn.Module):
         # base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
         # self.base = base(args, cent_obs_shape)
         self.base = TransformerEncoderBase(args, cent_obs_shape)
+        
+        # Store num_agents for transformer reshaping
+        self.num_agents = getattr(args, 'num_agents', 1)
+        # Auto-detect if using transformer
+        self.use_transformer = isinstance(self.base, TransformerEncoderBase)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -170,7 +198,16 @@ class R_Critic(nn.Module):
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
 
-        critic_features = self.base(cent_obs)
+        # Reshape for transformer if needed
+        if self.use_transformer:
+            batch_size = cent_obs.shape[0]
+            # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
+            cent_obs_reshaped = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            critic_features = self.base(cent_obs_reshaped)
+            # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
+            critic_features = critic_features.reshape(batch_size, -1)
+        else:
+            critic_features = self.base(cent_obs)
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
         values = self.v_out(critic_features)

@@ -606,3 +606,137 @@ class SharedReplayBuffer(object):
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
                   adv_targ, available_actions_batch
+
+
+    def recurrent_generator_agent_preserved(self, advantages, num_mini_batch, data_chunk_length):
+        """
+        Yield training data for chunked RNN training while preserving agent dimension.
+        :param advantages: (np.ndarray) advantage estimates.
+        :param num_mini_batch: (int) number of minibatches to split the batch into.
+        :param data_chunk_length: (int) length of sequence chunks with which to train RNN.
+        """
+        episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
+
+        # Instead of flattening agents, we work with rollout threads only
+        batch_size = n_rollout_threads * episode_length
+        data_chunks = batch_size // data_chunk_length  # [C=N*T/L]
+        mini_batch_size = data_chunks // num_mini_batch
+
+        rand = torch.randperm(data_chunks).numpy()
+        sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
+
+        # Helper function to cast without flattening agents
+        def _cast_preserve_agents(x):
+            """Reshape [T, N, M, ...] to [N*T, M, ...]"""
+            T, N, M = x.shape[:3]
+            return x.transpose(1, 0, 2, 3).reshape(N * T, M, *x.shape[3:])
+
+        # Process data while preserving agent dimension
+        if len(self.share_obs.shape) > 4:
+            # For high-dimensional observations (e.g., images)
+            # [T+1, N, M, C, H, W] -> [N*T, M, C, H, W]
+            share_obs = self.share_obs[:-1].transpose(1, 0, 2, 3, 4, 5).reshape(
+                n_rollout_threads * episode_length, num_agents, *self.share_obs.shape[3:])
+            obs = self.obs[:-1].transpose(1, 0, 2, 3, 4, 5).reshape(
+                n_rollout_threads * episode_length, num_agents, *self.obs.shape[3:])
+        else:
+            # [T+1, N, M, ...] -> [N*T, M, ...]
+            share_obs = _cast_preserve_agents(self.share_obs[:-1])
+            obs = _cast_preserve_agents(self.obs[:-1])
+
+        actions = _cast_preserve_agents(self.actions)
+        action_log_probs = _cast_preserve_agents(self.action_log_probs)
+        advantages = _cast_preserve_agents(advantages)
+        value_preds = _cast_preserve_agents(self.value_preds[:-1])
+        returns = _cast_preserve_agents(self.returns[:-1])
+        masks = _cast_preserve_agents(self.masks[:-1])
+        active_masks = _cast_preserve_agents(self.active_masks[:-1])
+
+        # RNN states: [T+1, N, M, recurrent_N, hidden_size] -> [N*T, M, recurrent_N, hidden_size]
+        rnn_states = self.rnn_states[:-1].transpose(1, 0, 2, 3, 4).reshape(
+            n_rollout_threads * episode_length, num_agents, *self.rnn_states.shape[3:])
+        rnn_states_critic = self.rnn_states_critic[:-1].transpose(1, 0, 2, 3, 4).reshape(
+            n_rollout_threads * episode_length, num_agents, *self.rnn_states_critic.shape[3:])
+
+        if self.available_actions is not None:
+            available_actions = _cast_preserve_agents(self.available_actions[:-1])
+
+        for indices in sampler:
+            share_obs_batch = []
+            obs_batch = []
+            rnn_states_batch = []
+            rnn_states_critic_batch = []
+            actions_batch = []
+            available_actions_batch = []
+            value_preds_batch = []
+            return_batch = []
+            masks_batch = []
+            active_masks_batch = []
+            old_action_log_probs_batch = []
+            adv_targ = []
+
+            for index in indices:
+                ind = index * data_chunk_length
+
+                # Collect chunks of length L while preserving agent dimension
+                # Each will be [L, M, ...]
+                share_obs_batch.append(share_obs[ind:ind + data_chunk_length])
+                obs_batch.append(obs[ind:ind + data_chunk_length])
+                actions_batch.append(actions[ind:ind + data_chunk_length])
+                if self.available_actions is not None:
+                    available_actions_batch.append(available_actions[ind:ind + data_chunk_length])
+                value_preds_batch.append(value_preds[ind:ind + data_chunk_length])
+                return_batch.append(returns[ind:ind + data_chunk_length])
+                masks_batch.append(masks[ind:ind + data_chunk_length])
+                active_masks_batch.append(active_masks[ind:ind + data_chunk_length])
+                old_action_log_probs_batch.append(action_log_probs[ind:ind + data_chunk_length])
+                adv_targ.append(advantages[ind:ind + data_chunk_length])
+
+                # Get initial RNN states for this chunk [M, recurrent_N, hidden_size]
+                rnn_states_batch.append(rnn_states[ind])
+                rnn_states_critic_batch.append(rnn_states_critic[ind])
+
+            L, N = data_chunk_length, mini_batch_size
+            M = num_agents
+
+            # Stack along batch dimension: [L, M, ...] -> [L, N, M, ...]
+            share_obs_batch = np.stack(share_obs_batch, axis=1)
+            obs_batch = np.stack(obs_batch, axis=1)
+            actions_batch = np.stack(actions_batch, axis=1)
+            if self.available_actions is not None:
+                available_actions_batch = np.stack(available_actions_batch, axis=1)
+            value_preds_batch = np.stack(value_preds_batch, axis=1)
+            return_batch = np.stack(return_batch, axis=1)
+            masks_batch = np.stack(masks_batch, axis=1)
+            active_masks_batch = np.stack(active_masks_batch, axis=1)
+            old_action_log_probs_batch = np.stack(old_action_log_probs_batch, axis=1)
+            adv_targ = np.stack(adv_targ, axis=1)
+
+            # RNN states: list of [M, recurrent_N, hidden_size] -> [N, M, recurrent_N, hidden_size]
+            rnn_states_batch = np.stack(rnn_states_batch)
+            rnn_states_critic_batch = np.stack(rnn_states_critic_batch)
+
+            # Helper function to flatten sequence and batch dims only
+            def _flatten_seq_batch(L, N, x):
+                """Flatten [L, N, M, ...] to [L*N, M, ...]"""
+                return x.reshape(L * N, *x.shape[2:])
+
+            # Flatten sequence and batch dimensions, keeping agent dimension
+            # [L, N, M, ...] -> [L*N, M, ...]
+            share_obs_batch = _flatten_seq_batch(L, N, share_obs_batch)
+            obs_batch = _flatten_seq_batch(L, N, obs_batch)
+            actions_batch = _flatten_seq_batch(L, N, actions_batch)
+            if self.available_actions is not None:
+                available_actions_batch = _flatten_seq_batch(L, N, available_actions_batch)
+            else:
+                available_actions_batch = None
+            value_preds_batch = _flatten_seq_batch(L, N, value_preds_batch)
+            return_batch = _flatten_seq_batch(L, N, return_batch)
+            masks_batch = _flatten_seq_batch(L, N, masks_batch)
+            active_masks_batch = _flatten_seq_batch(L, N, active_masks_batch)
+            old_action_log_probs_batch = _flatten_seq_batch(L, N, old_action_log_probs_batch)
+            adv_targ = _flatten_seq_batch(L, N, adv_targ)
+
+            yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
+                value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
+                adv_targ, available_actions_batch
