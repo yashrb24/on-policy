@@ -1,4 +1,4 @@
-name: marl
+name: grf
 channels:
   - defaults
 dependencies:

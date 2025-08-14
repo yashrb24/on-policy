@@ -57,7 +57,7 @@ class FootballEnv(object):
         else:
             for idx in range(self.num_agents):
                 self.action_space.append(spaces.Discrete(
-                    n=self.env.action_space[idx].n
+                    n=self.env.action_space.nvec[idx]
                 ))
                 self.observation_space.append(spaces.Box(
                     low=self.env.observation_space.low[idx],
