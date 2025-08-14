@@ -1,3 +1,7 @@
+.idea
+*.txt
+*.pdf
+*.md
 __pycache__
 results
 *.pyc
