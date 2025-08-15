@@ -28,17 +28,18 @@ class R_Actor(nn.Module):
         self._use_naive_recurrent_policy = args.use_naive_recurrent_policy
         self._use_recurrent_policy = args.use_recurrent_policy
         self._recurrent_N = args.recurrent_N
+        self.use_transformer_base = args.use_transformer_base
         self.tpdv = dict(dtype=torch.float32, device=device)
 
         obs_shape = get_shape_from_obs_space(obs_space)
-        # base = CNNBase if len(obs_shape) == 3 else MLPBase
-        # self.base = base(args, obs_shape)
-        self.base = TransformerEncoderBase(args, obs_shape)
-        
-        # Store num_agents for transformer reshaping
+
+        if self.use_transformer_base:
+            self.base = TransformerEncoderBase(args, obs_shape)
+        else:
+            base = CNNBase if len(obs_shape) == 3 else MLPBase
+            self.base = base(args, obs_shape)
+
         self.num_agents = getattr(args, 'num_agents', 1)
-        # Auto-detect if using transformer
-        self.use_transformer = isinstance(self.base, TransformerEncoderBase)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -69,7 +70,7 @@ class R_Actor(nn.Module):
             available_actions = check(available_actions).to(**self.tpdv)
 
         # Reshape for transformer if needed
-        if self.use_transformer:
+        if self.use_transformer_base:
             batch_size = obs.shape[0]
             # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
             obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
@@ -103,26 +104,30 @@ class R_Actor(nn.Module):
         obs = check(obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
         action = check(action).to(**self.tpdv)
+        if self.use_transformer_base:
+            action = action.reshape(-1, action.shape[-1])
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
+            if self.use_transformer_base:
+                available_actions = available_actions.reshape(-1, available_actions.shape[-1])
 
         if active_masks is not None:
             active_masks = check(active_masks).to(**self.tpdv)
+            if self.use_transformer_base:
+                active_masks = active_masks.reshape(-1, active_masks.shape[-1])
 
-        # Reshape for transformer if needed
-        if self.use_transformer:
-            batch_size = obs.shape[0]
-            # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
-            obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
-            actor_features = self.base(obs_reshaped)
-            # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
-            actor_features = actor_features.reshape(batch_size, -1)
-        else:
-            actor_features = self.base(obs)
+        actor_features = self.base(obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
-            actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+            if self.use_transformer_base:
+                actor_features = actor_features.reshape(-1, actor_features.shape[-1]) # num_rollout_threads * num_agents, action_feature_dim
+                rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1]) # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
+                masks = masks.reshape(-1, masks.shape[-1]) # num_rollout_threads * num_agents, 1
+                actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+            else:
+                actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+                
 
         if self.algo == "hatrpo":
             action_log_probs, dist_entropy ,action_mu, action_std, all_probs= self.act.evaluate_actions_trpo(actor_features,
@@ -158,18 +163,18 @@ class R_Critic(nn.Module):
         self._use_recurrent_policy = args.use_recurrent_policy
         self._recurrent_N = args.recurrent_N
         self._use_popart = args.use_popart
+        self.num_agents = getattr(args, 'num_agents', 1)
+        self.use_transformer_base = args.use_transformer_base
         self.tpdv = dict(dtype=torch.float32, device=device)
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][self._use_orthogonal]
 
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
-        # base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
-        # self.base = base(args, cent_obs_shape)
-        self.base = TransformerEncoderBase(args, cent_obs_shape)
-        
-        # Store num_agents for transformer reshaping
-        self.num_agents = getattr(args, 'num_agents', 1)
-        # Auto-detect if using transformer
-        self.use_transformer = isinstance(self.base, TransformerEncoderBase)
+
+        if self.use_transformer_base:
+            self.base = TransformerEncoderBase(args, cent_obs_shape)
+        else:
+            base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
+            self.base = base(args, cent_obs_shape)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -199,17 +204,28 @@ class R_Critic(nn.Module):
         masks = check(masks).to(**self.tpdv)
 
         # Reshape for transformer if needed
-        if self.use_transformer:
-            batch_size = cent_obs.shape[0]
-            # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
-            cent_obs_reshaped = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
-            critic_features = self.base(cent_obs_reshaped)
-            # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
-            critic_features = critic_features.reshape(batch_size, -1)
+        if self.use_transformer_base:
+            if not self.training:
+                batch_size = cent_obs.shape[0]
+                # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
+                cent_obs_reshaped = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+                critic_features = self.base(cent_obs_reshaped)
+                # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
+                critic_features = critic_features.reshape(batch_size, -1)
+            else:
+                critic_features = self.base(cent_obs)
+
+            critic_features = critic_features.reshape(-1, critic_features.shape[-1])
+
         else:
             critic_features = self.base(cent_obs)
+
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+            if self.use_transformer_base and self.training:
+                rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])  # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
+                masks = masks.reshape(-1, masks.shape[-1])
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
+
         values = self.v_out(critic_features)
 
         return values, rnn_states

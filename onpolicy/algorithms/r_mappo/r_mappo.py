@@ -32,6 +32,7 @@ class R_MAPPO():
 
         self._use_recurrent_policy = args.use_recurrent_policy
         self._use_naive_recurrent = args.use_naive_recurrent_policy
+        self.use_transformer_base = args.use_transformer_base
         self._use_max_grad_norm = args.use_max_grad_norm
         self._use_clipped_value_loss = args.use_clipped_value_loss
         self._use_huber_loss = args.use_huber_loss
@@ -116,6 +117,12 @@ class R_MAPPO():
         return_batch = check(return_batch).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
+        if self.use_transformer_base:
+            old_action_log_probs_batch = old_action_log_probs_batch.reshape(-1, old_action_log_probs_batch.shape[-1])
+            adv_targ = adv_targ.reshape(-1, adv_targ.shape[-1])
+            value_preds_batch = value_preds_batch.reshape(-1, value_preds_batch.shape[-1])
+            return_batch = return_batch.reshape(-1, return_batch.shape[-1])
+
         # Reshape to do in a single forward pass for all steps
         values, action_log_probs, dist_entropy = self.policy.evaluate_actions(share_obs_batch,
                                                                               obs_batch, 
@@ -126,12 +133,17 @@ class R_MAPPO():
                                                                               available_actions_batch,
                                                                               active_masks_batch)
         # actor update
+
+
         imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
 
         surr1 = imp_weights * adv_targ
         surr2 = torch.clamp(imp_weights, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
 
         if self._use_policy_active_masks:
+            if self.use_transformer_base:
+                active_masks_batch = active_masks_batch.reshape(-1, active_masks_batch.shape[-1])
+
             policy_action_loss = (-torch.sum(torch.min(surr1, surr2),
                                              dim=-1,
                                              keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
@@ -198,7 +210,10 @@ class R_MAPPO():
 
         for _ in range(self.ppo_epoch):
             if self._use_recurrent_policy:
-                data_generator = buffer.recurrent_generator_agent_preserved(advantages, self.num_mini_batch, self.data_chunk_length)
+                if self.use_transformer_base:
+                    data_generator = buffer.recurrent_generator_agent_preserved(advantages, self.num_mini_batch, self.data_chunk_length)
+                else:
+                    data_generator = buffer.recurrent_generator(advantages, self.num_mini_batch, self.data_chunk_length)
             elif self._use_naive_recurrent:
                 data_generator = buffer.naive_recurrent_generator(advantages, self.num_mini_batch)
             else:

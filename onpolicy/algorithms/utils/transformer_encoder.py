@@ -111,11 +111,11 @@ class TransformerEncoderBase(nn.Module):
     def __init__(self, args, obs_shape):
         super(TransformerEncoderBase, self).__init__()
 
-        n_block = args["n_block"]
-        n_embd = args["n_embd"]
-        n_head = args["n_head"]
-        n_agent = args.get("num_agents", None)
-        assert n_agent is not None, "n_agent value wasn't correctly passed to TransformerEncoderBase"
+        n_block = args.n_block
+        n_embd = args.n_embd
+        n_head = args.n_head
+        n_agent = args.num_agents
+        assert n_agent == 3, "n_agent value wasn't correctly passed to TransformerEncoderBase"
 
         obs_dim = obs_shape[0]
 

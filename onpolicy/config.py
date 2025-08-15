@@ -50,6 +50,8 @@ def get_config():
             by default True, use centralized training mode; or else will decentralized training mode.
         --stacked_frames <int>
             Number of input frames which should be stack together.
+        --use_transformer_base <bool>
+            by default False, will use CNN/MLP-based architecture; if set, will use Transformer-based architecture.
         --hidden_size <int>
             Dimension of hidden layers for actor/critic networks
         --layer_N <int>
@@ -196,6 +198,8 @@ def get_config():
                         help="Dimension of hidden layers for actor/critic networks")
     parser.add_argument("--use_stacked_frames", action='store_true',
                         default=False, help="Whether to use stacked_frames")
+    parser.add_argument("--use_transformer_base", action='store_true',
+                        default=False, help="Whether to use transformer-based encoder")
     parser.add_argument("--hidden_size", type=int, default=64,
                         help="Dimension of hidden layers for actor/critic networks") 
     parser.add_argument("--layer_N", type=int, default=1,
