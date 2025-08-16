@@ -740,3 +740,30 @@ class SharedReplayBuffer(object):
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
                 value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
                 adv_targ, available_actions_batch
+
+    def get_data_generator(self, advantages, num_mini_batch, data_chunk_length=None, 
+                           use_recurrent=False, use_naive_recurrent=False, use_transformer=False):
+        """Get appropriate data generator based on model configuration.
+        
+        Args:
+            advantages: Advantage estimates
+            num_mini_batch: Number of mini-batches
+            data_chunk_length: Length of chunks for recurrent training
+            use_recurrent: Whether using recurrent policy
+            use_naive_recurrent: Whether using naive recurrent policy
+            use_transformer: Whether using transformer base
+        
+        Returns:
+            Generator yielding training batches
+        """
+        if use_recurrent:
+            if use_transformer:
+                # Use agent-preserved generator for transformer models
+                return self.recurrent_generator_agent_preserved(advantages, num_mini_batch, data_chunk_length)
+            else:
+                # Use standard recurrent generator
+                return self.recurrent_generator(advantages, num_mini_batch, data_chunk_length)
+        elif use_naive_recurrent:
+            return self.naive_recurrent_generator(advantages, num_mini_batch)
+        else:
+            return self.feed_forward_generator(advantages, num_mini_batch)

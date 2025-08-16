@@ -9,6 +9,27 @@ from onpolicy.algorithms.utils.act import ACTLayer
 from onpolicy.algorithms.utils.popart import PopArt
 from onpolicy.utils.util import get_shape_from_obs_space
 
+"""
+Transformer Reshaping Logic:
+
+The transformer-based base requires special handling of the agent dimension:
+1. TransformerEncoderBase expects input shape: (batch, n_agents, obs_dim)
+2. Other archs flatten all dimensions: (batch * n_agents, obs_dim)
+
+Data Flow:
+- During training with transformer:
+  * SharedBuffer.recurrent_generator_agent_preserved() provides data as [L*N, M, ...]
+  * Where L=chunk_length, N=mini_batch_size, M=num_agents
+  * This preserves the agent dimension for transformer processing
+
+- During inference with transformer:
+  * Input arrives as [batch*agents, obs_dim] and needs reshaping
+  * Reshape to [batch, agents, obs_dim] for transformer
+  * Flatten back to [batch*agents, hidden_dim] for downstream processing
+
+- The flag `use_transformer_base` tells whether the transformer should be used or not. 
+"""
+
 
 class R_Actor(nn.Module):
     """
@@ -66,6 +87,7 @@ class R_Actor(nn.Module):
         obs = check(obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
+
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
@@ -104,9 +126,13 @@ class R_Actor(nn.Module):
         obs = check(obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
         action = check(action).to(**self.tpdv)
+        masks = check(masks).to(**self.tpdv)
+
         if self.use_transformer_base:
             action = action.reshape(-1, action.shape[-1])
-        masks = check(masks).to(**self.tpdv)
+            rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])  # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
+            masks = masks.reshape(-1, masks.shape[-1])  # num_rollout_threads * num_agents, 1
+
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
             if self.use_transformer_base:
@@ -117,13 +143,14 @@ class R_Actor(nn.Module):
             if self.use_transformer_base:
                 active_masks = active_masks.reshape(-1, active_masks.shape[-1])
 
-        actor_features = self.base(obs)
+        if self.use_transformer_base:
+            actor_features = self.base(obs)
+            actor_features = actor_features.reshape(-1, actor_features.shape[-1])  # num_rollout_threads * num_agents, action_feature_dim
+        else:
+            actor_features = self.base(obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             if self.use_transformer_base:
-                actor_features = actor_features.reshape(-1, actor_features.shape[-1]) # num_rollout_threads * num_agents, action_feature_dim
-                rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1]) # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
-                masks = masks.reshape(-1, masks.shape[-1]) # num_rollout_threads * num_agents, 1
                 actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
             else:
                 actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
@@ -205,6 +232,7 @@ class R_Critic(nn.Module):
 
         # Reshape for transformer if needed
         if self.use_transformer_base:
+            # collect phase, not getting data from generators
             if not self.training:
                 batch_size = cent_obs.shape[0]
                 # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
@@ -212,18 +240,21 @@ class R_Critic(nn.Module):
                 critic_features = self.base(cent_obs_reshaped)
                 # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
                 critic_features = critic_features.reshape(batch_size, -1)
+            # training phase, getting data from generators
             else:
                 critic_features = self.base(cent_obs)
 
             critic_features = critic_features.reshape(-1, critic_features.shape[-1])
-
+        # not using transformer base, can proceed without any changes
         else:
             critic_features = self.base(cent_obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+
             if self.use_transformer_base and self.training:
                 rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])  # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
-                masks = masks.reshape(-1, masks.shape[-1])
+                masks = masks.reshape(-1, masks.shape[-1]) # num_rollout_threads * num_agents, 1
+
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
 
         values = self.v_out(critic_features)

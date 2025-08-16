@@ -50,6 +50,23 @@ class R_MAPPO():
         else:
             self.value_normalizer = None
 
+    def _prepare_batch_for_transformer(self, *tensors):
+        """Helper to flatten agent dimension for transformer-based models.
+
+        Args:
+            *tensors: Variable number of tensors to reshape
+
+        Returns:
+            List of reshaped tensors with agent dimension flattened
+        """
+        reshaped = []
+        for tensor in tensors:
+            if tensor is not None:
+                reshaped.append(tensor.reshape(-1, tensor.shape[-1]))
+            else:
+                reshaped.append(None)
+        return reshaped if len(reshaped) > 1 else reshaped[0]
+
     def cal_value_loss(self, values, value_preds_batch, return_batch, active_masks_batch):
         """
         Calculate value function loss.
@@ -117,11 +134,11 @@ class R_MAPPO():
         return_batch = check(return_batch).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
+        # Flatten agent dimension for transformer-based models
         if self.use_transformer_base:
-            old_action_log_probs_batch = old_action_log_probs_batch.reshape(-1, old_action_log_probs_batch.shape[-1])
-            adv_targ = adv_targ.reshape(-1, adv_targ.shape[-1])
-            value_preds_batch = value_preds_batch.reshape(-1, value_preds_batch.shape[-1])
-            return_batch = return_batch.reshape(-1, return_batch.shape[-1])
+            old_action_log_probs_batch, adv_targ, value_preds_batch, return_batch = \
+                self._prepare_batch_for_transformer(old_action_log_probs_batch, adv_targ, 
+                                                   value_preds_batch, return_batch)
 
         # Reshape to do in a single forward pass for all steps
         values, action_log_probs, dist_entropy = self.policy.evaluate_actions(share_obs_batch,
@@ -142,7 +159,7 @@ class R_MAPPO():
 
         if self._use_policy_active_masks:
             if self.use_transformer_base:
-                active_masks_batch = active_masks_batch.reshape(-1, active_masks_batch.shape[-1])
+                active_masks_batch = self._prepare_batch_for_transformer(active_masks_batch)
 
             policy_action_loss = (-torch.sum(torch.min(surr1, surr2),
                                              dim=-1,
@@ -209,15 +226,15 @@ class R_MAPPO():
         train_info['ratio'] = 0
 
         for _ in range(self.ppo_epoch):
-            if self._use_recurrent_policy:
-                if self.use_transformer_base:
-                    data_generator = buffer.recurrent_generator_agent_preserved(advantages, self.num_mini_batch, self.data_chunk_length)
-                else:
-                    data_generator = buffer.recurrent_generator(advantages, self.num_mini_batch, self.data_chunk_length)
-            elif self._use_naive_recurrent:
-                data_generator = buffer.naive_recurrent_generator(advantages, self.num_mini_batch)
-            else:
-                data_generator = buffer.feed_forward_generator(advantages, self.num_mini_batch)
+            # Get appropriate data generator based on model configuration
+            data_generator = buffer.get_data_generator(
+                advantages,
+                self.num_mini_batch,
+                data_chunk_length=self.data_chunk_length if self._use_recurrent_policy else None,
+                use_recurrent=self._use_recurrent_policy,
+                use_naive_recurrent=self._use_naive_recurrent,
+                use_transformer=self.use_transformer_base
+            )
 
             for sample in data_generator:
 
