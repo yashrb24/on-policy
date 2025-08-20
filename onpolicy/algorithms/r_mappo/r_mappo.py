@@ -5,6 +5,7 @@ from onpolicy.utils.util import get_gard_norm, huber_loss, mse_loss
 from onpolicy.utils.valuenorm import ValueNorm
 from onpolicy.algorithms.utils.util import check
 
+
 class R_MAPPO():
     """
     Trainer class for MAPPO to update policies.
@@ -32,7 +33,8 @@ class R_MAPPO():
 
         self._use_recurrent_policy = args.use_recurrent_policy
         self._use_naive_recurrent = args.use_naive_recurrent_policy
-        self.use_transformer_base = args.use_transformer_base
+        self.use_transformer_base_actor = args.use_transformer_base_actor
+        self.use_transformer_base_critic = args.use_transformer_base_critic
         self._use_max_grad_norm = args.use_max_grad_norm
         self._use_clipped_value_loss = args.use_clipped_value_loss
         self._use_huber_loss = args.use_huber_loss
@@ -62,7 +64,7 @@ class R_MAPPO():
         reshaped = []
         for tensor in tensors:
             if tensor is not None:
-                reshaped.append(tensor.reshape(-1, tensor.shape[-1]))
+                reshaped.append(tensor.reshape(-1, *tensor.shape[2:]))
             else:
                 reshaped.append(None)
         return reshaped if len(reshaped) > 1 else reshaped[0]
@@ -135,10 +137,14 @@ class R_MAPPO():
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
         # Flatten agent dimension for transformer-based models
-        if self.use_transformer_base:
+        if self.use_transformer_base_actor:
             old_action_log_probs_batch, adv_targ, value_preds_batch, return_batch = \
                 self._prepare_batch_for_transformer(old_action_log_probs_batch, adv_targ, 
                                                    value_preds_batch, return_batch)
+
+            if not self.use_transformer_base_critic:
+                share_obs_batch, rnn_states_critic_batch = \
+                    self._prepare_batch_for_transformer(share_obs_batch, rnn_states_critic_batch)
 
         # Reshape to do in a single forward pass for all steps
         values, action_log_probs, dist_entropy = self.policy.evaluate_actions(share_obs_batch,
@@ -150,15 +156,13 @@ class R_MAPPO():
                                                                               available_actions_batch,
                                                                               active_masks_batch)
         # actor update
-
-
         imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
 
         surr1 = imp_weights * adv_targ
         surr2 = torch.clamp(imp_weights, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
 
         if self._use_policy_active_masks:
-            if self.use_transformer_base:
+            if self.use_transformer_base_actor:
                 active_masks_batch = self._prepare_batch_for_transformer(active_masks_batch)
 
             policy_action_loss = (-torch.sum(torch.min(surr1, surr2),
@@ -233,7 +237,7 @@ class R_MAPPO():
                 data_chunk_length=self.data_chunk_length if self._use_recurrent_policy else None,
                 use_recurrent=self._use_recurrent_policy,
                 use_naive_recurrent=self._use_naive_recurrent,
-                use_transformer=self.use_transformer_base
+                use_transformer=self.use_transformer_base_actor
             )
 
             for sample in data_generator:
