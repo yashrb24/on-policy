@@ -28,6 +28,7 @@ class R_MAPPO():
         self.data_chunk_length = args.data_chunk_length
         self.value_loss_coef = args.value_loss_coef
         self.entropy_coef = args.entropy_coef
+        self.comm_coef = args.comm_coeff
         self.max_grad_norm = args.max_grad_norm       
         self.huber_delta = args.huber_delta
 
@@ -171,12 +172,17 @@ class R_MAPPO():
         else:
             policy_action_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
 
+        comm_metrics = self.policy.get_comm_metrics()
+        comm_loss = 0
+        if comm_metrics is not None:
+            comm_loss, _ = comm_metrics
+
         policy_loss = policy_action_loss
 
         self.policy.actor_optimizer.zero_grad()
 
         if update_actor:
-            (policy_loss - dist_entropy * self.entropy_coef).backward()
+            (policy_loss - dist_entropy * self.entropy_coef + self.comm_coef * comm_loss).backward()
 
         if self._use_max_grad_norm:
             actor_grad_norm = nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
@@ -228,6 +234,8 @@ class R_MAPPO():
         train_info['actor_grad_norm'] = 0
         train_info['critic_grad_norm'] = 0
         train_info['ratio'] = 0
+        train_info['comm_loss'] = 0
+        train_info['comm_bits'] = 0
 
         for _ in range(self.ppo_epoch):
             # Get appropriate data generator based on model configuration
@@ -251,6 +259,12 @@ class R_MAPPO():
                 train_info['actor_grad_norm'] += actor_grad_norm
                 train_info['critic_grad_norm'] += critic_grad_norm
                 train_info['ratio'] += imp_weights.mean()
+                
+                # Collect communication metrics if available
+                comm_metrics = self.policy.get_comm_metrics()
+                if comm_metrics is not None:
+                    train_info['comm_loss'] += comm_metrics[0].item() if torch.is_tensor(comm_metrics[0]) else comm_metrics[0]
+                    train_info['comm_bits'] += comm_metrics[1].item() if torch.is_tensor(comm_metrics[1]) else comm_metrics[1]
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 

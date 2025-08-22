@@ -56,7 +56,8 @@ class R_Actor(nn.Module):
         obs_shape = get_shape_from_obs_space(obs_space)
 
         if self.use_transformer_base_actor:
-            self.base = TransformerEncoderBase(args, obs_shape)
+            # Actor always calculates communication metrics if communication channel is enabled
+            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True)
         else:
             base = CNNBase if len(obs_shape) == 3 else MLPBase
             self.base = base(args, obs_shape)
@@ -97,7 +98,14 @@ class R_Actor(nn.Module):
             batch_size = obs.shape[0]
             # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
             obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
-            actor_features = self.base(obs_reshaped)
+            base_output = self.base(obs_reshaped)
+            
+            # Handle communication metrics if transformer returns them
+            if isinstance(base_output, tuple):
+                actor_features, _ = base_output # the ignored return value is comm_metrics
+            else:
+                actor_features = base_output
+            
             # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
             actor_features = actor_features.reshape(batch_size, -1)
         else:
@@ -144,8 +152,16 @@ class R_Actor(nn.Module):
             if self.use_transformer_base_actor:
                 active_masks = active_masks.reshape(-1, active_masks.shape[-1])
 
+        comm_metrics = None
         if self.use_transformer_base_actor:
-            actor_features = self.base(obs)
+            base_output = self.base(obs)
+            
+            # Handle communication metrics if transformer returns them
+            if isinstance(base_output, tuple):
+                actor_features, comm_metrics = base_output
+            else:
+                actor_features = base_output
+            
             actor_features = actor_features.reshape(-1, actor_features.shape[-1])  # num_rollout_threads * num_agents, action_feature_dim
         else:
             actor_features = self.base(obs)
@@ -172,7 +188,7 @@ class R_Actor(nn.Module):
                                                                     active_masks if self._use_policy_active_masks
                                                                     else None)
 
-        return action_log_probs, dist_entropy
+        return action_log_probs, dist_entropy, comm_metrics
 
 
 class R_Critic(nn.Module):
@@ -199,7 +215,8 @@ class R_Critic(nn.Module):
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
         if self.use_transformer_base_critic:
-            self.base = TransformerEncoderBase(args, cent_obs_shape)
+            # Critic never calculates communication metrics
+            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
             self.base = base(args, cent_obs_shape)

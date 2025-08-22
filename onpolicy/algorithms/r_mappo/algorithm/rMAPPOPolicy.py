@@ -1,7 +1,6 @@
 import torch
 from onpolicy.algorithms.r_mappo.algorithm.r_actor_critic import R_Actor, R_Critic
 from onpolicy.utils.util import update_linear_schedule
-from ipdb import set_trace
 
 
 class R_MAPPOPolicy:
@@ -104,15 +103,42 @@ class R_MAPPOPolicy:
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
         """
-        action_log_probs, dist_entropy = self.actor.evaluate_actions(obs,
-                                                                     rnn_states_actor,
-                                                                     action,
-                                                                     masks,
-                                                                     available_actions,
-                                                                     active_masks)
+        actor_output = self.actor.evaluate_actions(obs,
+                                                   rnn_states_actor,
+                                                   action,
+                                                   masks,
+                                                   available_actions,
+                                                   active_masks)
+        
+        # Handle different return formats from actor
+        if len(actor_output) == 3:
+            action_log_probs, dist_entropy, actor_comm_metrics = actor_output
+        else:
+            # compatibility for non-transformer or hatrpo case
+            action_log_probs, dist_entropy = actor_output
+            actor_comm_metrics = None
 
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
+        
+        comm_loss = 0
+        comm_bits = 0
+        
+        if actor_comm_metrics is not None:
+            comm_loss = actor_comm_metrics[0]
+            comm_bits = actor_comm_metrics[1]
+
+        # Store communication metrics for retrieval
+        self._comm_metrics = (comm_loss, comm_bits) if (comm_loss > 0 or comm_bits > 0) else None
+        
         return values, action_log_probs, dist_entropy
+    
+    def get_comm_metrics(self):
+        """
+        Get communication metrics from the last forward pass.
+        
+        :return comm_metrics: (tuple) (comm_loss, comm_bits) or None if no communication channel used.
+        """
+        return getattr(self, '_comm_metrics', None)
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
         """
