@@ -142,7 +142,7 @@ class EncodeBlock(nn.Module):
 class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, obs_shape, n_block, n_embd, n_head,
-                 use_comms_channel=False, num_messages=256):
+                 use_comms_channel=False, num_messages=15):
         super(TransformerEncoderLayer, self).__init__()
 
         self.obs_dim = obs_shape
@@ -189,10 +189,10 @@ class TransformerEncoderBase(nn.Module):
 
         obs_dim = obs_shape[0]
 
-        # Check if communication channel is enabled (backward compatible)
-        use_comms_channel = getattr(args, 'use_comms_channel', False)
-        num_messages = getattr(args, 'num_messages', 256)
-        
+        # Check if communication channel is enabled 
+        use_comms_channel = args.use_comms_channel
+        num_messages = args.num_messages
+
         # Store flag for communication metrics calculation
         self.calc_comm_metrics = calc_comm_metrics and use_comms_channel
 
