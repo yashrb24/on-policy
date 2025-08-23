@@ -57,7 +57,7 @@ class SelfAttention(nn.Module):
         M = self.num_messages
 
         loss = torch.log2(2 * M * z.abs() + 1)
-        return torch.sum(loss)
+        return torch.mean(torch.sum(loss, dim=(1, 2, 3)))
 
     def compute_num_bits_used(self, target):
         """Track the number of bits used in communication."""

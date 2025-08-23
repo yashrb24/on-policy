@@ -318,6 +318,6 @@ def get_config():
     parser.add_argument("--num_messages", type=int, default=15,
                         help="Number of messages for communication channel quantization (default: 256)")
     parser.add_argument("--comm_coeff", type=float, default=0.0001,
-                        help="Coefficient for communication channel loss (default: 0.0001)")
+                        help="Coefficient for communication channel loss (default: 0.001)")
     
     return parser

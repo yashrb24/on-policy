@@ -236,6 +236,7 @@ class R_MAPPO():
         train_info['ratio'] = 0
         train_info['comm_loss'] = 0
         train_info['comm_bits'] = 0
+        train_info['actor_loss'] = 0
 
         for _ in range(self.ppo_epoch):
             # Get appropriate data generator based on model configuration
@@ -259,12 +260,15 @@ class R_MAPPO():
                 train_info['actor_grad_norm'] += actor_grad_norm
                 train_info['critic_grad_norm'] += critic_grad_norm
                 train_info['ratio'] += imp_weights.mean()
-                
+                train_info['actor_loss'] += policy_loss.item() - self.entropy_coef * dist_entropy.item()
+
                 # Collect communication metrics if available
                 comm_metrics = self.policy.get_comm_metrics()
                 if comm_metrics is not None:
-                    train_info['comm_loss'] += comm_metrics[0].item() if torch.is_tensor(comm_metrics[0]) else comm_metrics[0]
+                    comm_loss = comm_metrics[0].item() if torch.is_tensor(comm_metrics[0]) else comm_metrics[0]
+                    train_info['comm_loss'] += comm_loss
                     train_info['comm_bits'] += comm_metrics[1].item() if torch.is_tensor(comm_metrics[1]) else comm_metrics[1]
+                    train_info['actor_loss'] += self.comm_coef * comm_loss
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 
