@@ -34,7 +34,7 @@ num_env_steps=25000000
 episode_length=200
 
 # Run multiple seeds
-for seed in 1 42 123 456 789; do
+for seed in 1 2 3 4 5; do
     echo "Running seed: $seed"
     CUDA_VISIBLE_DEVICES=${CUDA_DEVICE} python ../train/train_football.py \
     --env_name ${env} --scenario_name ${scenario} --algorithm_name ${algo} --experiment_name ${exp} --seed ${seed} \
