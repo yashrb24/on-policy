@@ -21,10 +21,9 @@
 # # --use_comms_channel --comm_coeff 0.0001
 
 
-#!/bin/bash
+#!/bin/sh
 
 CUDA_DEVICE=${1:-0}
-SEEDS=(1 2 3 4 5)  # 5 different seeds
 
 env="Football"
 scenario="academy_3_vs_1_with_keeper"
@@ -34,7 +33,8 @@ num_agents=3
 num_env_steps=25000000
 episode_length=200
 
-for seed in "${SEEDS[@]}"; do
+# Run multiple seeds
+for seed in 1 42 123 456 789; do
     echo "Running seed: $seed"
     CUDA_VISIBLE_DEVICES=${CUDA_DEVICE} python ../train/train_football.py \
     --env_name ${env} --scenario_name ${scenario} --algorithm_name ${algo} --experiment_name ${exp} --seed ${seed} \
