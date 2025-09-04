@@ -15,6 +15,6 @@ episode_length=200
 CUDA_VISIBLE_DEVICES=0 python ../train/train_football.py \
 --env_name ${env} --scenario_name ${scenario} --algorithm_name ${algo} --experiment_name ${exp} --seed 1 \
 --num_agents ${num_agents} --num_env_steps ${num_env_steps} --episode_length ${episode_length} \
---representation "simple115v2" --rewards "scoring,checkpoints" --n_rollout_threads 50 --ppo_epoch 15 --num_mini_batch 2 \
+--representation "simple115v2" --rewards "scoring" --n_rollout_threads 50 --ppo_epoch 15 --num_mini_batch 2 \
 --save_interval 200000 --log_interval 200000 --use_eval --eval_interval 400000 --n_eval_rollout_threads 100 --eval_episodes 100 \
 --use_transformer_base_actor --use_comms_channel --comm_coeff 0.0001 --user_name "yashrb" --wandb_name "on-policy" 
