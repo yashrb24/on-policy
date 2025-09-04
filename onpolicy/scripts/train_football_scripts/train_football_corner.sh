@@ -32,10 +32,10 @@ scenario="academy_corner"
 algo="rmappo"
 exp="check"
 # football param
-num_agents=10
+num_agents=3
 # train param
-num_env_steps=50000000
-episode_length=1000
+num_env_steps=25000000
+episode_length=200
 n_rollout_threads=50
 ppo_epoch=15
 num_mini_batch=2
