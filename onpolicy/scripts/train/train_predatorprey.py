@@ -78,6 +78,9 @@ def parse_args(args, parser):
                         help='cooperative|competitive|mixed (default: mixed)')
     parser.add_argument('--enemy_comm', action="store_true", default=False,
                         help="Whether prey can communicate.")
+    parser.add_argument("--eval_deterministic", action="store_false",
+                        default=True,
+                        help="by default True. If False, sample action according to probability")
 
     all_args = parser.parse_known_args(args)[0]
 

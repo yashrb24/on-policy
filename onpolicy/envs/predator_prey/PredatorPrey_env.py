@@ -23,6 +23,7 @@ import curses
 import gym
 import numpy as np
 from gym import spaces
+from ipdb import set_trace
 
 
 class PredatorPreyEnv(gym.Env):
@@ -61,7 +62,7 @@ class PredatorPreyEnv(gym.Env):
             setattr(self, key, getattr(args, key))
 
         self.nprey = args.nenemies
-        self.npredator = args.nfriendly
+        self.npredator = args.num_agents
         self.dims = dims = (self.dim, self.dim)
         self.stay = not args.no_stay
 
@@ -75,7 +76,7 @@ class PredatorPreyEnv(gym.Env):
         else:
             self.naction = 4
 
-        self.action_space = [spaces.MultiDiscrete([self.naction]) for _ in range(self.npredator)]
+        self.action_space = spaces.MultiDiscrete([self.naction])
 
         self.BASE = (dims[0] * dims[1])
         self.OUTSIDE_CLASS += self.BASE
@@ -88,14 +89,18 @@ class PredatorPreyEnv(gym.Env):
 
         # Observation for each agent will be flattened vision * vision * vocab_size array
         obs_dim = self.vocab_size * ((2 * self.vision) + 1) * ((2 * self.vision) + 1)
+        
+        # Number of agents that will have observations (predators + prey if enemy_comm enabled)
+        self.n_agents = self.npredator if not self.enemy_comm else self.npredator + self.nprey
+        
         self.observation_space = [spaces.Box(low=0, high=1,
                                              shape=(obs_dim,),
-                                             dtype=np.float32) for _ in range(self.npredator)]
-        # Actual observation will be of the shape 1 * npredator * (2v+1) * (2v+1) * vocab_size
+                                             dtype=np.float32) for _ in range(self.n_agents)]
+        # Actual observation will be of the shape 1 * n_agents * (2v+1) * (2v+1) * vocab_size
         tmp_obs = self.reset()
-        share_obs_dim = int(np.prod(tmp_obs[0].shape)) * self.npredator
+        share_obs_dim = int(np.prod(tmp_obs[0].shape)) * self.n_agents
         self.share_observation_space = [spaces.Box(low=0, high=1, shape=(share_obs_dim,), dtype=np.float32)
-                                        for _ in range(self.npredator)]
+                                        for _ in range(self.n_agents)]
 
         return
 

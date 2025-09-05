@@ -165,7 +165,6 @@ class PredatorPreyRunner(Runner):
 
         # init eval goals
         num_done = 0
-        eval_goals = np.zeros(self.all_args.eval_episodes)
         eval_win_rates = np.zeros(self.all_args.eval_episodes)
         eval_steps = np.zeros(self.all_args.eval_episodes)
         step = 0
@@ -204,7 +203,6 @@ class PredatorPreyRunner(Runner):
             if np.any(eval_dones_unfinished_env):
                 for idx_env in range(self.n_eval_rollout_threads):
                     if unfinished_thread[idx_env] and eval_dones_env[idx_env]:
-                        eval_goals[num_done] = eval_infos[idx_env]["score_reward"]
                         eval_win_rates[num_done] = 1 if eval_infos[idx_env]["score_reward"] > 0 else 0
                         eval_steps[num_done] = eval_infos[idx_env]["max_steps"] - eval_infos[idx_env]["steps_left"]
                         # print("episode {:>2d} done by env {:>2d}: {}".format(num_done, idx_env, eval_infos[idx_env]["score_reward"]))
@@ -221,18 +219,14 @@ class PredatorPreyRunner(Runner):
             step += 1
 
         # get expected goal
-        eval_goal = np.mean(eval_goals)
         eval_win_rate = np.mean(eval_win_rates)
         eval_step = np.mean(eval_steps)
 
         # log and print
-        print("eval expected goal is {}.".format(eval_goal))
         if self.use_wandb:
-            wandb.log({"eval_goal": eval_goal}, step=total_num_steps)
             wandb.log({"eval_win_rate": eval_win_rate}, step=total_num_steps)
             wandb.log({"eval_step": eval_step}, step=total_num_steps)
         else:
-            self.writter.add_scalars("eval_goal", {"expected_goal": eval_goal}, total_num_steps)
             self.writter.add_scalars("eval_win_rate", {"eval_win_rate": eval_win_rate}, total_num_steps)
             self.writter.add_scalars("eval_step", {"expected_step": eval_step}, total_num_steps)
 
