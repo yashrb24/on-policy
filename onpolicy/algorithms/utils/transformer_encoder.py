@@ -16,7 +16,8 @@ def init_(m, gain=0.01, activate=False):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=256):
+    def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=256,
+                 use_fake_quantization=False, quant_bits=8):
         super(SelfAttention, self).__init__()
 
         assert n_embd % n_head == 0
@@ -27,6 +28,12 @@ class SelfAttention(nn.Module):
         # Communication channel parameters (backward compatible)
         self.use_comms_channel = use_comms_channel
         self.num_messages = num_messages
+
+        # Quantization parameters
+        self.use_fake_quantization = use_fake_quantization
+        self.quant_bits = quant_bits
+        self.quant_min = 0
+        self.quant_max = 2 ** quant_bits - 1
 
         # key, query, value projections for all heads
         self.key = init_(nn.Linear(n_embd, n_embd))
@@ -58,14 +65,62 @@ class SelfAttention(nn.Module):
 
         batch_size = z.size(0)
         loss = torch.log2(2 * M * z.abs() + 1)
-        
-        return torch.mean(torch.sum(loss.view(batch_size, -1), dim=1)) 
+
+        return torch.mean(torch.sum(loss.view(batch_size, -1), dim=1))
 
     def compute_num_bits_used(self, target):
         """Track the number of bits used in communication."""
         # All agents active, so count all elements
         bits_used = torch.ones_like(target) * 32  # float32
         return torch.sum(bits_used)
+
+    def apply_fake_quantization(self, tensor):
+        """
+        Manual implementation of fake quantization with proper gradient flow
+        """
+        # Create a copy of the input tensor to avoid modifying the original
+        original = tensor.clone()
+
+        min_val = torch.tensor(0.0, device=tensor.device)
+        max_val = torch.tensor(1.0, device=tensor.device)
+
+        if min_val == max_val:
+            min_val = min_val - 0.01
+            max_val = max_val + 0.01
+
+        # Calculate scale and zero_point from detached values
+        scale = (max_val - min_val) / (self.quant_max - self.quant_min)
+        zero_point = torch.round(self.quant_min - min_val / scale)
+
+        # Apply quantization formula without modifying the original
+        scaled = tensor / scale + zero_point
+        rounded = torch.round(scaled)
+        clamped = torch.clamp(rounded, self.quant_min, self.quant_max)
+        shifted = clamped - zero_point
+        dequantized = shifted * scale
+
+        return dequantized
+
+    def compute_quantization_loss(self, tensor):
+        """
+        Compute loss based on the quantized tensor values
+        """
+        # Compute the loss directly on all tensor values
+        loss = torch.log2(2 * self.quant_max * torch.abs(tensor) + 1).sum()
+
+        return loss
+
+    def compute_quantization_bits(self, tensor):
+        """
+        Compute the actual bits used based on the tensor values
+        """
+        # Count total number of values in the tensor
+        num_values = tensor.numel()
+
+        # Each value uses quant_bits bits
+        total_bits = self.quant_bits * num_values
+
+        return total_bits
 
     def forward(self, key, value, query):
         B, L, D = query.size()
@@ -117,14 +172,17 @@ class SelfAttention(nn.Module):
 class EncodeBlock(nn.Module):
     """ an unassuming Transformer block """
 
-    def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=256):
+    def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=256, use_fake_quantization=False,
+                 quant_bits=8):
         super(EncodeBlock, self).__init__()
 
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
         self.attn = SelfAttention(n_embd, n_head, masked=False,
                                   use_comms_channel=use_comms_channel,
-                                  num_messages=num_messages)
+                                  num_messages=num_messages,
+                                  use_fake_quantization=use_fake_quantization,
+                                  quant_bits=quant_bits)
         self.mlp = nn.Sequential(
             init_(nn.Linear(n_embd, 1 * n_embd), activate=True),
             nn.GELU(),
@@ -143,8 +201,8 @@ class EncodeBlock(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
 
-    def __init__(self, obs_shape, n_block, n_embd, n_head,
-                 use_comms_channel=False, num_messages=15):
+    def __init__(self, obs_shape, n_block, n_embd, n_head, use_comms_channel=False, num_messages=15,
+                 use_fake_quantization=False, quant_bits=8):
         super(TransformerEncoderLayer, self).__init__()
 
         self.obs_dim = obs_shape
@@ -157,7 +215,9 @@ class TransformerEncoderLayer(nn.Module):
         self.ln = nn.LayerNorm(n_embd)
         self.blocks = nn.ModuleList([EncodeBlock(n_embd, n_head,
                                                  use_comms_channel=use_comms_channel,
-                                                 num_messages=num_messages)
+                                                 num_messages=num_messages,
+                                                 use_fake_quantization=use_fake_quantization,
+                                                 quant_bits=quant_bits)
                                      for _ in range(n_block)])
 
     def forward(self, obs):
@@ -195,6 +255,10 @@ class TransformerEncoderBase(nn.Module):
         use_comms_channel = args.use_comms_channel
         num_messages = args.num_messages
 
+        # Check if fake quantization is enabled
+        use_fake_quantization = args.use_fake_quantization
+        quant_bits = args.quant_bits
+
         # Store flag for communication metrics calculation
         self.calc_comm_metrics = calc_comm_metrics and use_comms_channel
 
@@ -202,7 +266,9 @@ class TransformerEncoderBase(nn.Module):
             obs_dim,
             n_block, n_embd, n_head,
             use_comms_channel=use_comms_channel,
-            num_messages=num_messages
+            num_messages=num_messages,
+            use_fake_quantization=use_fake_quantization,
+            quant_bits=quant_bits
         )
 
     def forward(self, x):

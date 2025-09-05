@@ -164,11 +164,14 @@ def get_config():
     parser.add_argument("--algorithm_name", type=str,
                         default='mappo', choices=["rmappo", "mappo", "happo", "hatrpo", "mat", "mat_dec"])
 
-    parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
+    parser.add_argument("--experiment_name", type=str, default="check",
+                        help="an identifier to distinguish different experiment.")
     parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")
-    parser.add_argument("--cuda", action='store_false', default=True, help="by default True, will use GPU to train; or else will use CPU;")
+    parser.add_argument("--cuda", action='store_false', default=True,
+                        help="by default True, will use GPU to train; or else will use CPU;")
     parser.add_argument("--cuda_deterministic",
-                        action='store_false', default=True, help="by default, make sure random seed effective. if set, bypass such function.")
+                        action='store_false', default=True,
+                        help="by default, make sure random seed effective. if set, bypass such function.")
     parser.add_argument("--n_training_threads", type=int,
                         default=1, help="Number of torch threads for training")
     parser.add_argument("--n_rollout_threads", type=int, default=32,
@@ -179,8 +182,10 @@ def get_config():
                         help="Number of parallel envs for rendering rollouts")
     parser.add_argument("--num_env_steps", type=int, default=10e6,
                         help='Number of environment steps to train (default: 10e6)')
-    parser.add_argument("--user_name", type=str, default='marl', help="[for wandb usage], to specify user's name for simply collecting training data.")
-    parser.add_argument("--use_wandb", action='store_false', default=True, help="[for wandb usage], by default True, will log date to wandb server. or else will use tensorboard to log data.")
+    parser.add_argument("--user_name", type=str, default='marl',
+                        help="[for wandb usage], to specify user's name for simply collecting training data.")
+    parser.add_argument("--use_wandb", action='store_false', default=True,
+                        help="[for wandb usage], by default True, will log date to wandb server. or else will use tensorboard to log data.")
 
     # env parameters
     parser.add_argument("--env_name", type=str, default='StarCraft2', help="specify the name of environment")
@@ -205,13 +210,15 @@ def get_config():
     parser.add_argument("--use_transformer_base_critic", action='store_true',
                         default=False, help="Whether to use transformer-based encoder for critic")
     parser.add_argument("--hidden_size", type=int, default=64,
-                        help="Dimension of hidden layers for actor/critic networks") 
+                        help="Dimension of hidden layers for actor/critic networks")
     parser.add_argument("--layer_N", type=int, default=1,
                         help="Number of layers for actor/critic networks")
     parser.add_argument("--use_ReLU", action='store_false',
                         default=True, help="Whether to use ReLU")
-    parser.add_argument("--use_popart", action='store_true', default=False, help="by default False, use PopArt to normalize rewards.")
-    parser.add_argument("--use_valuenorm", action='store_false', default=True, help="by default True, use running mean and std to normalize rewards.")
+    parser.add_argument("--use_popart", action='store_true', default=False,
+                        help="by default False, use PopArt to normalize rewards.")
+    parser.add_argument("--use_valuenorm", action='store_false', default=True,
+                        help="by default True, use running mean and std to normalize rewards.")
     parser.add_argument("--use_feature_normalization", action='store_false',
                         default=True, help="Whether to apply layernorm to the inputs")
     parser.add_argument("--use_orthogonal", action='store_false', default=True,
@@ -238,18 +245,19 @@ def get_config():
     parser.add_argument("--weight_decay", type=float, default=0)
 
     # trpo parameters
-    parser.add_argument("--kl_threshold", type=float, 
+    parser.add_argument("--kl_threshold", type=float,
                         default=0.01, help='the threshold of kl-divergence (default: 0.01)')
-    parser.add_argument("--ls_step", type=int, 
+    parser.add_argument("--ls_step", type=int,
                         default=10, help='number of line search (default: 10)')
-    parser.add_argument("--accept_ratio", type=float, 
+    parser.add_argument("--accept_ratio", type=float,
                         default=0.5, help='accept ratio of loss improve (default: 0.5)')
 
     # ppo parameters
     parser.add_argument("--ppo_epoch", type=int, default=15,
                         help='number of ppo epochs (default: 15)')
     parser.add_argument("--use_clipped_value_loss",
-                        action='store_false', default=True, help="by default, clip loss value. If set, do not clip loss value.")
+                        action='store_false', default=True,
+                        help="by default, clip loss value. If set, do not clip loss value.")
     parser.add_argument("--clip_param", type=float, default=0.2,
                         help='ppo clip parameter (default: 0.2)')
     parser.add_argument("--num_mini_batch", type=int, default=1,
@@ -259,7 +267,8 @@ def get_config():
     parser.add_argument("--value_loss_coef", type=float,
                         default=1, help='value loss coefficient (default: 0.5)')
     parser.add_argument("--use_max_grad_norm",
-                        action='store_false', default=True, help="by default, use max norm of gradients. If set, do not use.")
+                        action='store_false', default=True,
+                        help="by default, use max norm of gradients. If set, do not use.")
     parser.add_argument("--max_grad_norm", type=float, default=10.0,
                         help='max norm of gradients (default: 0.5)')
     parser.add_argument("--use_gae", action='store_false',
@@ -270,36 +279,47 @@ def get_config():
                         help='gae lambda parameter (default: 0.95)')
     parser.add_argument("--use_proper_time_limits", action='store_true',
                         default=False, help='compute returns taking into account time limits')
-    parser.add_argument("--use_huber_loss", action='store_false', default=True, help="by default, use huber loss. If set, do not use huber loss.")
+    parser.add_argument("--use_huber_loss", action='store_false', default=True,
+                        help="by default, use huber loss. If set, do not use huber loss.")
     parser.add_argument("--use_value_active_masks",
-                        action='store_false', default=True, help="by default True, whether to mask useless data in value loss.")
+                        action='store_false', default=True,
+                        help="by default True, whether to mask useless data in value loss.")
     parser.add_argument("--use_policy_active_masks",
-                        action='store_false', default=True, help="by default True, whether to mask useless data in policy loss.")
+                        action='store_false', default=True,
+                        help="by default True, whether to mask useless data in policy loss.")
     parser.add_argument("--huber_delta", type=float, default=10.0, help=" coefficience of huber loss.")
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action='store_true',
                         default=False, help='use a linear schedule on the learning rate')
     # save parameters
-    parser.add_argument("--save_interval", type=int, default=1, help="time duration between contiunous twice models saving.")
+    parser.add_argument("--save_interval", type=int, default=1,
+                        help="time duration between contiunous twice models saving.")
 
     # log parameters
-    parser.add_argument("--log_interval", type=int, default=5, help="time duration between contiunous twice log printing.")
+    parser.add_argument("--log_interval", type=int, default=5,
+                        help="time duration between contiunous twice log printing.")
 
     # eval parameters
-    parser.add_argument("--use_eval", action='store_true', default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
-    parser.add_argument("--eval_interval", type=int, default=25, help="time duration between contiunous twice evaluation progress.")
+    parser.add_argument("--use_eval", action='store_true', default=False,
+                        help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
+    parser.add_argument("--eval_interval", type=int, default=25,
+                        help="time duration between contiunous twice evaluation progress.")
     parser.add_argument("--eval_episodes", type=int, default=32, help="number of episodes of a single evaluation.")
 
     # render parameters
-    parser.add_argument("--save_gifs", action='store_true', default=False, help="by default, do not save render video. If set, save video.")
-    parser.add_argument("--use_render", action='store_true', default=False, help="by default, do not render the env during training. If set, start render. Note: something, the environment has internal render process which is not controlled by this hyperparam.")
+    parser.add_argument("--save_gifs", action='store_true', default=False,
+                        help="by default, do not save render video. If set, save video.")
+    parser.add_argument("--use_render", action='store_true', default=False,
+                        help="by default, do not render the env during training. If set, start render. Note: something, the environment has internal render process which is not controlled by this hyperparam.")
     parser.add_argument("--render_episodes", type=int, default=5, help="the number of episodes to render a given env")
-    parser.add_argument("--ifi", type=float, default=0.1, help="the play interval of each rendered image in saved video.")
+    parser.add_argument("--ifi", type=float, default=0.1,
+                        help="the play interval of each rendered image in saved video.")
 
     # pretrained parameters
-    parser.add_argument("--model_dir", type=str, default=None, help="by default None. set the path to pretrained model.")
-    
+    parser.add_argument("--model_dir", type=str, default=None,
+                        help="by default None. set the path to pretrained model.")
+
     # add for transformer
     parser.add_argument("--encode_state", action='store_true', default=False)
     parser.add_argument("--n_block", type=int, default=1)
@@ -311,7 +331,7 @@ def get_config():
     # add for online multi-task
     parser.add_argument("--train_maps", type=str, nargs='+', default=None)
     parser.add_argument("--eval_maps", type=str, nargs='+', default=None)
-    
+
     # add for communication channel in transformer
     parser.add_argument("--use_comms_channel", action='store_true', default=False,
                         help="Whether to use communication channel with noise in transformer encoder of actor")
@@ -319,5 +339,8 @@ def get_config():
                         help="Number of messages for communication channel quantization (default: 256)")
     parser.add_argument("--comm_coeff", type=float, default=0.0001,
                         help="Coefficient for communication channel loss (default: 0.001)")
-    
+    parser.add_argument("--use_fake_quantization", action='store_true', default=False,
+                        help="Whether to use fake quantization for communication channel")
+    parser.add_argument("--quant_bits", type=int, default=8, help="Quantization bits for communication channel")
+
     return parser
