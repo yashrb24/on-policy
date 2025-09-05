@@ -43,6 +43,9 @@ class PredatorPreyEnv(gym.Env):
         # Initialize random number generator
         self.np_random = None
 
+        # track reward collected over the complete episode
+        self.episode_reward = 0
+
         self._multi_agent_init(args)
 
     def init_curses(self):
@@ -137,10 +140,12 @@ class PredatorPreyEnv(gym.Env):
         # Reshape rewards to have shape (n_agents, 1) for consistency with framework
         reward = reward[:self.npredator].reshape(self.npredator, 1)
 
+        self.episode_reward += np.mean(reward)
+
         # Create dones array for all agents - shape should be (n_agents,)
         dones = np.array([self.episode_over] * self.npredator, dtype=bool)
 
-        debug = {'predator_locs': self.predator_loc, 'prey_locs': self.prey_loc}
+        debug = {'predator_locs': self.predator_loc, 'prey_locs': self.prey_loc, 'episode_reward': self.episode_reward}
         return self.obs, reward, dones, debug
 
     def reset(self):
@@ -230,7 +235,7 @@ class PredatorPreyEnv(gym.Env):
 
         obs = np.stack(obs)
         # Transpose to match expected shape: (n_agents, vocab_size, height, width)
-        obs = np.transpose(obs, (0, 3, 1, 2))
+        # obs = np.transpose(obs, (0, 3, 1, 2))
         # Flatten each agent's observation to 1D
         obs = obs.reshape(obs.shape[0], -1)
         return obs

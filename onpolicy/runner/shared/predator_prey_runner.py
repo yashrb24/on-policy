@@ -119,6 +119,11 @@ class PredatorPreyRunner(Runner):
         # get environment-level dones
         dones_env = np.all(dones, axis=1)
 
+        # update env_infos if done
+        dones_env = np.all(dones, axis=-1)
+        for done in dones_env:
+            self.env_infos["win_rate"].append(int(done))
+
         # reset rnn and mask args for done envs
         rnn_states[dones_env == True] = np.zeros(
             ((dones_env == True).sum(), self.num_agents, self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -203,8 +208,8 @@ class PredatorPreyRunner(Runner):
             if np.any(eval_dones_unfinished_env):
                 for idx_env in range(self.n_eval_rollout_threads):
                     if unfinished_thread[idx_env] and eval_dones_env[idx_env]:
-                        eval_win_rates[num_done] = 1 if eval_infos[idx_env]["score_reward"] > 0 else 0
-                        eval_steps[num_done] = eval_infos[idx_env]["max_steps"] - eval_infos[idx_env]["steps_left"]
+                        # eval_win_rates[num_done] = int(eval_dones_env[idx_env])
+                        # eval_steps[num_done] = eval_infos[idx_env]["max_steps"] - eval_infos[idx_env]["steps_left"]
                         # print("episode {:>2d} done by env {:>2d}: {}".format(num_done, idx_env, eval_infos[idx_env]["score_reward"]))
                         num_done += 1
                         done_episodes_per_thread[idx_env] += 1
