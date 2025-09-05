@@ -30,7 +30,7 @@ CUDA_DEVICE=${1:-1}
 env="Football"
 scenario="academy_corner"
 algo="rmappo"
-exp="check"
+exp="vanilla_rmappo_academy_corner"
 # football param
 num_agents=3
 # train param
