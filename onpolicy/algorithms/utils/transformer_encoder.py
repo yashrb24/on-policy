@@ -144,6 +144,13 @@ class SelfAttention(nn.Module):
             self.comm_loss += self.compute_component_log_loss(k)
             self.comm_bits += self.compute_num_bits_used(k)
 
+        elif self.use_fake_quantization:
+            k = self.apply_fake_quantization(k)
+
+            # Track communication metrics for keys
+            self.comm_loss += self.compute_quantization_loss(k)
+            self.comm_bits += self.compute_quantization_bits(k)
+
         # causal attention: (B, nh, L, hs) x (B, nh, hs, L) -> (B, nh, L, L)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 
@@ -163,6 +170,13 @@ class SelfAttention(nn.Module):
             # Track communication metrics for output
             self.comm_loss += self.compute_component_log_loss(y)
             self.comm_bits += self.compute_num_bits_used(y)
+
+        elif self.use_fake_quantization:
+            y = self.apply_fake_quantization(y)
+
+            # Track communication metrics for output
+            self.comm_loss += self.compute_quantization_loss(y)
+            self.comm_bits += self.compute_quantization_bits(y)
 
         # output projection
         y = self.proj(y)
