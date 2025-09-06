@@ -92,10 +92,10 @@ class PredatorPreyEnv(gym.Env):
 
         # Observation for each agent will be flattened vision * vision * vocab_size array
         obs_dim = self.vocab_size * ((2 * self.vision) + 1) * ((2 * self.vision) + 1)
-        
+
         # Number of agents that will have observations (predators + prey if enemy_comm enabled)
         self.n_agents = self.npredator if not self.enemy_comm else self.npredator + self.nprey
-        
+
         self.observation_space = [spaces.Box(low=0, high=1,
                                              shape=(obs_dim,),
                                              dtype=np.float32) for _ in range(self.n_agents)]
@@ -158,6 +158,7 @@ class PredatorPreyEnv(gym.Env):
         """
         self.episode_over = False
         self.reached_prey = np.zeros(self.npredator)
+        self.episode_reward = 0  # Reset episode reward
 
         # Locations
         locs = self._get_cordinates()
@@ -198,7 +199,10 @@ class PredatorPreyEnv(gym.Env):
 
     def _get_cordinates(self):
         """Generate random coordinates for agents using the seeded random generator."""
-        idx = self.np_random.choice(np.prod(self.dims), (self.npredator + self.nprey), replace=False)
+        if self.np_random is not None:
+            idx = self.np_random.choice(np.prod(self.dims), (self.npredator + self.nprey), replace=False)
+        else:
+            idx = np.random.choice(np.prod(self.dims), (self.npredator + self.nprey), replace=False)
         return np.vstack(np.unravel_index(idx, self.dims)).T
 
     def _set_grid(self):
@@ -234,8 +238,6 @@ class PredatorPreyEnv(gym.Env):
                 obs.append(self.bool_base_grid[slice_y, slice_x])
 
         obs = np.stack(obs)
-        # Transpose to match expected shape: (n_agents, vocab_size, height, width)
-        # obs = np.transpose(obs, (0, 3, 1, 2))
         # Flatten each agent's observation to 1D
         obs = obs.reshape(obs.shape[0], -1)
         return obs
@@ -286,13 +288,9 @@ class PredatorPreyEnv(gym.Env):
         n = self.npredator if not self.enemy_comm else self.npredator + self.nprey
         reward = np.full(n, self.TIMESTEP_PENALTY)
 
-        # Check if any predator is on the same location as prey
-        on_prey = []
-        for i, pred_loc in enumerate(self.predator_loc):
-            for prey_loc in self.prey_loc:
-                if np.array_equal(pred_loc, prey_loc):
-                    on_prey.append(i)
-        on_prey = np.array(on_prey, dtype=int) if on_prey else np.array([], dtype=int)
+        # Using the original vectorized approach for finding predators on prey
+        # This handles single prey case efficiently
+        on_prey = np.where(np.all(self.predator_loc == self.prey_loc, axis=1))[0]
         nb_predator_on_prey = on_prey.size
 
         if self.mode == 'cooperative':
@@ -305,8 +303,7 @@ class PredatorPreyEnv(gym.Env):
         else:
             raise RuntimeError("Incorrect mode, Available modes: [cooperative|competitive|mixed]")
 
-        if nb_predator_on_prey > 0:
-            self.reached_prey[on_prey] = 1
+        self.reached_prey[on_prey] = 1
 
         if np.all(self.reached_prey == 1) and self.mode == 'mixed':
             self.episode_over = True
