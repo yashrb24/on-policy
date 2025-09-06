@@ -17,6 +17,11 @@ class PredatorPreyRunner(Runner):
     def __init__(self, config):
         super(PredatorPreyRunner, self).__init__(config)
         self.env_infos = defaultdict(list)
+        
+        # Initialize episode trackers for each parallel environment
+        self.episode_rewards = np.zeros(self.n_rollout_threads)
+        self.episode_steps = np.zeros(self.n_rollout_threads, dtype=int)
+        self.episodes_completed = 0  # Track total episodes completed
 
     def run(self):
         self.warmup()
@@ -39,6 +44,27 @@ class PredatorPreyRunner(Runner):
 
                 # insert data into buffer
                 self.insert(data)
+                
+                # Check for timeout episodes at the last step
+                if step == self.episode_length - 1:
+                    # Handle episodes that didn't complete naturally
+                    dones_env = np.all(dones, axis=-1)
+                    for i in range(self.n_rollout_threads):
+                        if not dones_env[i] and self.episode_steps[i] > 0:
+                            # Episode timed out without success - this is a failure in mixed mode
+                            self.env_infos["episode_rewards"].append(self.episode_rewards[i] + np.sum(rewards[i]))  # Add final step reward
+                            self.env_infos["episode_length"].append(self.episode_steps[i] + 1)  # Include final step
+                            self.env_infos["win_rate"].append(0.0)  # Failed episode
+                            
+                            # Track partial progress
+                            if 'predators_on_prey' in infos[i]:
+                                partial = infos[i]['predators_on_prey'] / self.num_agents
+                                self.env_infos["partial_success_rate"].append(partial)
+                            
+                            # Reset trackers
+                            self.episode_rewards[i] = 0.0
+                            self.episode_steps[i] = 0
+                            self.episodes_completed += 1
 
             # compute return and update network
             self.compute()
@@ -64,8 +90,34 @@ class PredatorPreyRunner(Runner):
                               self.num_env_steps,
                               int(total_num_steps / (end - start))))
 
-                train_infos["average_episode_rewards"] = np.mean(self.buffer.rewards) * self.episode_length
-                print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
+                # Use properly tracked episode rewards
+                if len(self.env_infos["episode_rewards"]) > 0:
+                    train_infos["average_episode_rewards"] = np.mean(self.env_infos["episode_rewards"])
+                    train_infos["average_episode_length"] = np.mean(self.env_infos["episode_length"])
+                    train_infos["episodes_completed"] = self.episodes_completed
+                    
+                    # Win rate is now correctly calculated from completed episodes only
+                    if len(self.env_infos["win_rate"]) > 0:
+                        train_infos["win_rate"] = np.mean(self.env_infos["win_rate"])
+                        train_infos["num_wins"] = np.sum(self.env_infos["win_rate"])
+                        
+                    if len(self.env_infos["success_steps"]) > 0:
+                        train_infos["average_win_steps"] = np.mean(self.env_infos["success_steps"])
+                    
+                    if len(self.env_infos["partial_success_rate"]) > 0:
+                        train_infos["partial_success_rate"] = np.mean(self.env_infos["partial_success_rate"])
+                else:
+                    # No episodes completed in this logging interval
+                    train_infos["average_episode_rewards"] = 0
+                    train_infos["win_rate"] = 0
+                    print("No episodes completed in this interval")
+                
+                print(f"Episodes completed: {self.episodes_completed}")
+                print(f"Win rate: {train_infos.get('win_rate', 0):.2%}")
+                print(f"Average episode rewards: {train_infos.get('average_episode_rewards', 0):.3f}")
+                if 'average_win_steps' in train_infos:
+                    print(f"Average steps to win: {train_infos['average_win_steps']:.1f}")
+                
                 self.log_train(train_infos, total_num_steps)
                 self.log_env(self.env_infos, total_num_steps)
                 self.env_infos = defaultdict(list)
@@ -117,12 +169,41 @@ class PredatorPreyRunner(Runner):
         obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
         # get environment-level dones
-        dones_env = np.all(dones, axis=1)
-
-        # update env_infos if done
         dones_env = np.all(dones, axis=-1)
-        for done in dones_env:
-            self.env_infos["win_rate"].append(int(done))
+        
+        # Accumulate rewards for each environment and track episode completion
+        for i in range(self.n_rollout_threads):
+            # Add current step rewards
+            self.episode_rewards[i] += np.sum(rewards[i])
+            self.episode_steps[i] += 1
+            
+            # Check if episode ended
+            if dones_env[i]:
+                # Record episode statistics ONLY when episode completes
+                self.env_infos["episode_rewards"].append(self.episode_rewards[i])
+                self.env_infos["episode_length"].append(self.episode_steps[i])
+                
+                # Record win rate based on mode
+                if self.all_args.mode == 'mixed':
+                    # Mixed mode: episode ends only on success
+                    self.env_infos["win_rate"].append(1.0)
+                    self.env_infos["success_steps"].append(self.episode_steps[i])
+                else:
+                    # Other modes: check info dict for success
+                    success = infos[i].get('success', 0)
+                    self.env_infos["win_rate"].append(float(success))
+                    if success:
+                        self.env_infos["success_steps"].append(self.episode_steps[i])
+                
+                # Track partial success if available
+                if 'predators_on_prey' in infos[i]:
+                    partial = infos[i]['predators_on_prey'] / self.num_agents
+                    self.env_infos["partial_success_rate"].append(partial)
+                
+                # Reset trackers for next episode
+                self.episode_rewards[i] = 0.0
+                self.episode_steps[i] = 0
+                self.episodes_completed += 1
 
         # reset rnn and mask args for done envs
         rnn_states[dones_env == True] = np.zeros(

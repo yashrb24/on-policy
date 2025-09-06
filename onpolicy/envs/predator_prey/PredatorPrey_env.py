@@ -145,7 +145,13 @@ class PredatorPreyEnv(gym.Env):
         # Create dones array for all agents - shape should be (n_agents,)
         dones = np.array([self.episode_over] * self.npredator, dtype=bool)
 
-        debug = {'predator_locs': self.predator_loc, 'prey_locs': self.prey_loc, 'episode_reward': self.episode_reward}
+        debug = {
+            'predator_locs': self.predator_loc, 
+            'prey_locs': self.prey_loc, 
+            'episode_reward': self.episode_reward,
+            'success': self.stat.get('success', 0),  # Add success flag
+            'predators_on_prey': int(np.sum(self.reached_prey))  # Track partial progress
+        }
         return self.obs, reward, dones, debug
 
     def reset(self):
