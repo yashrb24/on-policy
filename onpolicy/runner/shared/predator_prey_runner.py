@@ -92,9 +92,11 @@ class PredatorPreyRunner(Runner):
 
                 # Use properly tracked episode rewards
                 if len(self.env_infos["episode_rewards"]) > 0:
+                    episodes_in_interval = len(self.env_infos["episode_rewards"])
                     train_infos["average_episode_rewards"] = np.mean(self.env_infos["episode_rewards"])
                     train_infos["average_episode_length"] = np.mean(self.env_infos["episode_length"])
                     train_infos["episodes_completed"] = self.episodes_completed
+                    train_infos["episodes_in_interval"] = episodes_in_interval
                     
                     # Win rate is now correctly calculated from completed episodes only
                     if len(self.env_infos["win_rate"]) > 0:
@@ -108,15 +110,19 @@ class PredatorPreyRunner(Runner):
                         train_infos["partial_success_rate"] = np.mean(self.env_infos["partial_success_rate"])
                 else:
                     # No episodes completed in this logging interval
+                    episodes_in_interval = 0
                     train_infos["average_episode_rewards"] = 0
                     train_infos["win_rate"] = 0
+                    train_infos["episodes_in_interval"] = episodes_in_interval
                     print("No episodes completed in this interval")
                 
-                print(f"Episodes completed: {self.episodes_completed}")
-                print(f"Win rate: {train_infos.get('win_rate', 0):.2%}")
-                print(f"Average episode rewards: {train_infos.get('average_episode_rewards', 0):.3f}")
-                if 'average_win_steps' in train_infos:
-                    print(f"Average steps to win: {train_infos['average_win_steps']:.1f}")
+                print(f"Episodes completed (total): {self.episodes_completed}")
+                if episodes_in_interval > 0:
+                    print(f"Episodes in this interval: {episodes_in_interval}")
+                    print(f"Win rate: {train_infos.get('win_rate', 0):.2%} (based on {episodes_in_interval} episodes)")
+                    print(f"Average episode rewards: {train_infos.get('average_episode_rewards', 0):.3f} (based on {episodes_in_interval} episodes)")
+                    if 'average_win_steps' in train_infos:
+                        print(f"Average steps to win: {train_infos['average_win_steps']:.1f} (based on {len(self.env_infos['success_steps'])} winning episodes)")
                 
                 self.log_train(train_infos, total_num_steps)
                 self.log_env(self.env_infos, total_num_steps)
