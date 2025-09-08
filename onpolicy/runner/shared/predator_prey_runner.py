@@ -50,10 +50,11 @@ class PredatorPreyRunner(Runner):
                     # Handle episodes that didn't complete naturally
                     dones_env = np.all(dones, axis=-1)
                     for i in range(self.n_rollout_threads):
-                        if not dones_env[i] and self.episode_steps[i] > 0:
-                            # Episode timed out without success - this is a failure in mixed mode
+                        # Only count as failure if episode has run for full duration (episode_steps will be 39 after 40 steps: 0-39)
+                        if not dones_env[i] and self.episode_steps[i] >= self.episode_length - 1:
+                            # Episode timed out without success after running full duration - this is a failure in mixed mode
                             self.env_infos["episode_rewards"].append(self.episode_rewards[i] + np.sum(rewards[i]))  # Add final step reward
-                            self.env_infos["episode_length"].append(self.episode_steps[i] + 1)  # Include final step
+                            self.env_infos["episode_length"].append(self.episode_steps[i] + 1)  # Include final step (will be 40)
                             self.env_infos["win_rate"].append(0.0)  # Failed episode
                             
                             # Track partial progress
@@ -65,6 +66,7 @@ class PredatorPreyRunner(Runner):
                             self.episode_rewards[i] = 0.0
                             self.episode_steps[i] = 0
                             self.episodes_completed += 1
+                        # Episodes that haven't run full duration are ignored (not counted as failures)
 
             # compute return and update network
             self.compute()
