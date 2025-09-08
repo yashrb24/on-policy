@@ -47,6 +47,7 @@ class TrafficJunctionEnv(gym.Env):
 
         self.episode_over = False
         self.has_failed = 0
+        self.num_steps = 0
 
         # Initialize random state
         self.np_random = None
@@ -65,6 +66,9 @@ class TrafficJunctionEnv(gym.Env):
         curses.init_pair(5, curses.COLOR_BLUE, -1)
 
     def _multi_agent_init(self, args):
+
+        self.max_steps = args.episode_length
+
         # General variables defining the environment : CONFIG
         params = ['dim', 'vision', 'add_rate_min', 'add_rate_max', 'curr_start', 'curr_end',
                   'difficulty', 'vocab_type']
@@ -126,57 +130,26 @@ class TrafficJunctionEnv(gym.Env):
             self.CAR_CLASS += self.BASE
             # car_type + base + outside + 0-index
             self.vocab_size = 1 + self.BASE + 1 + 1
-            # Single agent observation space
-            single_obs_space = spaces.Tuple((
-                spaces.Discrete(self.naction),
-                spaces.Discrete(self.npath),
-                spaces.MultiBinary((2 * vision + 1, 2 * vision + 1, self.vocab_size))))
+            # Single agent flattened observation dimension: action + route_id + vision_grid
+            vision_size = (2 * vision + 1) ** 2 * self.vocab_size
+            single_obs_dim = 1 + 1 + vision_size  # action + route + flattened vision grid
         else:
             # r_i, (x,y), vocab = [road class + car]
             self.vocab_size = 1 + 1
-
-            # Observation for each agent will be 4-tuple of (r_i, last_act, len(dims), vision * vision * vocab)
-            single_obs_space = spaces.Tuple((
-                spaces.Discrete(self.naction),
-                spaces.Discrete(self.npath),
-                spaces.MultiDiscrete(dims),
-                spaces.MultiBinary((2 * vision + 1, 2 * vision + 1, self.vocab_size))))
-            # Actual observation will be of the shape 1 * ncar * ((x,y) , (2v+1) * (2v+1) * vocab_size)
-        
-        # Create multi-agent observation spaces - list of spaces for each agent
-        self.observation_space = [single_obs_space for _ in range(self.ncar)]
-        
-        # For shared observation space, we need to flatten and concatenate all observations
-        # First get a sample observation to determine the shape
-        temp_obs = self._get_temp_obs()
-        if temp_obs:
-            # Flatten each agent's observation and compute total size
-            flattened_size = 0
-            for obs in temp_obs:
-                if self.vocab_type == 'bool':
-                    # (action_norm, route_id_norm, vision_grid)
-                    flattened_size += 1 + 1 + obs[2].size  # action + route + flattened vision grid
-                else:
-                    # (action_norm, route_id_norm, position, vision_grid)
-                    flattened_size += 1 + 1 + obs[2].size + obs[3].size  # action + route + pos + vision grid
-            
-            # Shared observation space is the same for all agents (centralized training)
-            share_obs_dim = flattened_size
-            self.share_observation_space = [spaces.Box(low=0.0, high=1.0, 
-                                                      shape=(share_obs_dim,), 
-                                                      dtype=np.float32) for _ in range(self.ncar)]
-        else:
-            # Fallback if temp obs fails - use conservative estimate
+            # Single agent flattened observation dimension: action + route_id + position + vision_grid  
             vision_size = (2 * vision + 1) ** 2 * self.vocab_size
-            if self.vocab_type == 'bool':
-                single_flat_size = 2 + vision_size  # action + route + vision
-            else:
-                single_flat_size = 4 + vision_size  # action + route + pos + vision
-            
-            share_obs_dim = single_flat_size * self.ncar
-            self.share_observation_space = [spaces.Box(low=0.0, high=1.0,
-                                                      shape=(share_obs_dim,),
-                                                      dtype=np.float32) for _ in range(self.ncar)]
+            single_obs_dim = 1 + 1 + 2 + vision_size  # action + route + pos + flattened vision grid
+
+        # Create multi-agent observation spaces - list of flattened Box spaces for each agent
+        self.observation_space = [spaces.Box(low=0.0, high=1.0,
+                                             shape=(single_obs_dim,),
+                                             dtype=np.float32) for _ in range(self.ncar)]
+
+        # For shared observation space, concatenate all agents' observations
+        share_obs_dim = single_obs_dim * self.ncar
+        self.share_observation_space = [spaces.Box(low=0.0, high=1.0,
+                                                   shape=(share_obs_dim,),
+                                                   dtype=np.float32) for _ in range(self.ncar)]
 
         self._set_grid()
 
@@ -263,6 +236,8 @@ class TrafficJunctionEnv(gym.Env):
 
         assert len(action) == self.ncar, "Action for each agent should be provided."
 
+        self.num_steps += 1
+
         # No one is completed before taking action
         self.is_completed = np.zeros(self.ncar)
 
@@ -282,11 +257,14 @@ class TrafficJunctionEnv(gym.Env):
 
         self.stat['success'] = 1 - self.has_failed
         self.stat['add_rate'] = self.add_rate
-        
+
         # Include stat information in debug dict for runner access
         debug.update(self.stat)
 
-        return obs, reward, self.episode_over, debug
+        if self.num_steps >= self.max_steps:
+            self.episode_over = True
+
+        return obs, reward, [self.episode_over for _ in range(self.ncar)], debug
 
     def render(self, mode='human', close=False):
 
@@ -334,12 +312,12 @@ class TrafficJunctionEnv(gym.Env):
     def seed(self, seed=None):
         """
         Seed the environment's random number generator for reproducibility.
-        
+
         Parameters
         ----------
         seed : int, optional
             The seed value. If None, a random seed is used.
-            
+
         Returns
         -------
         list
@@ -411,53 +389,25 @@ class TrafficJunctionEnv(gym.Env):
                 v_sq = np.zeros_like(v_sq)
 
             if self.vocab_type == 'bool':
-                o = tuple((act, r_i, v_sq))
+                # o = tuple((act, r_i, v_sq))
+                o = np.concatenate((
+                    np.atleast_1d(act),
+                    np.atleast_1d(r_i),
+                    v_sq.flatten()
+                ))
             else:
-                o = tuple((act, r_i, p_norm, v_sq))
+                # o = tuple((act, r_i, p_norm, v_sq))
+                o = np.concatenate((
+                    np.atleast_1d(act),
+                    np.atleast_1d(r_i),
+                    p_norm.flatten(),
+                    v_sq.flatten()
+                ))
             obs.append(o)
 
         obs = tuple(obs)
 
         return obs
-
-    def _get_temp_obs(self):
-        """Get a temporary observation to determine observation space size."""
-        try:
-            # Temporarily set grid if not set yet
-            if not hasattr(self, 'empty_bool_base_grid'):
-                return None
-            
-            # Create temporary observation
-            h, w = self.dims
-            temp_bool_base_grid = self.empty_bool_base_grid.copy()
-            
-            if self.vocab_type == 'scalar':
-                temp_bool_base_grid = temp_bool_base_grid[:, :, 1:]
-            
-            obs = []
-            for i in range(min(self.ncar, 1)):  # Just get one observation for sizing
-                # most recent action (normalized)
-                act = 0.0  # dummy action
-                
-                # route id (normalized)
-                r_i = 0.0  # dummy route
-                
-                # loc (normalized) - only for scalar vocab_type
-                p_norm = np.array([0.0, 0.0]) if self.vocab_type == 'scalar' else None
-                
-                # vision square
-                vision_size = 2 * self.vision + 1
-                v_sq = temp_bool_base_grid[:vision_size, :vision_size]
-                
-                if self.vocab_type == 'bool':
-                    o = (act, r_i, v_sq)
-                else:
-                    o = (act, r_i, p_norm, v_sq)
-                obs.append(o)
-            
-            return obs
-        except:
-            return None
 
     def _add_cars(self):
         for r_i, routes in enumerate(self.routes):
@@ -674,6 +624,7 @@ class TrafficJunctionEnv(gym.Env):
                 self.has_failed = 1
 
         reward = self.alive_mask * reward
+        reward = np.expand_dims(reward, -1)
         return reward
 
     def _onehot_initialization(self, a):
