@@ -182,7 +182,7 @@ class PredatorPreyRunner(Runner):
         # Accumulate rewards for each environment and track episode completion
         for i in range(self.n_rollout_threads):
             # Add current step rewards
-            self.episode_rewards[i] += np.sum(rewards[i])
+            self.episode_rewards[i] += np.mean(rewards[i]) # TODO: only works for mixed case
             self.episode_steps[i] += 1
             
             # Check if episode ended

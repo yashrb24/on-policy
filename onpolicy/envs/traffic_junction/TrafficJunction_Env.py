@@ -253,7 +253,9 @@ class TrafficJunctionEnv(gym.Env):
                  'alive_mask': np.copy(self.alive_mask),
                  'wait': self.wait,
                  'cars_in_sys': self.cars_in_sys,
-                 'is_completed': np.copy(self.is_completed)}
+                 'is_completed': np.copy(self.is_completed),
+                 'has_failed': self.has_failed,
+                 'num_steps': self.num_steps}
 
         self.stat['success'] = 1 - self.has_failed
         self.stat['add_rate'] = self.add_rate
@@ -261,6 +263,7 @@ class TrafficJunctionEnv(gym.Env):
         # Include stat information in debug dict for runner access
         debug.update(self.stat)
 
+        # Check for timeout
         if self.num_steps >= self.max_steps:
             self.episode_over = True
 
