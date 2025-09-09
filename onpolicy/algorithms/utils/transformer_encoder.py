@@ -57,7 +57,7 @@ class SelfAttention(nn.Module):
 
         return noise
 
-    def compute_component_log_loss(self, z):
+    def compute_component_log_loss(self, z, active_masks=None):
         """
         Computes the communication penalty loss given by log2(2 * |M| * |z| + 1)
         """
@@ -66,12 +66,28 @@ class SelfAttention(nn.Module):
         batch_size = z.size(0)
         loss = torch.log2(2 * M * z.abs() + 1)
 
-        return torch.mean(torch.sum(loss.view(batch_size, -1), dim=1))
+        if active_masks is not None:
+            # Mask out inactive agents
+            # z shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(z)
+            loss = loss * mask_expanded
+            # Average only over active agents
+            active_elements = torch.sum(mask_expanded)
+            if active_elements > 0:
+                return torch.sum(loss) / active_elements
+            else:
+                return torch.tensor(0.0, device=z.device, dtype=z.dtype)
+        else:
+            return torch.mean(torch.sum(loss.view(batch_size, -1), dim=1))
 
-    def compute_num_bits_used(self, target):
+    def compute_num_bits_used(self, target, active_masks=None):
         """Track the number of bits used in communication."""
-        # All agents active, so count all elements
         bits_used = torch.ones_like(target) * 32  # float32
+        if active_masks is not None:
+            # Expand masks to match target dimensions
+            # target shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(target)
+            bits_used = bits_used * mask_expanded
         return torch.sum(bits_used)
 
     def apply_fake_quantization(self, tensor):
@@ -101,28 +117,41 @@ class SelfAttention(nn.Module):
 
         return dequantized
 
-    def compute_quantization_loss(self, tensor):
+    def compute_quantization_loss(self, tensor, active_masks=None):
         """
         Compute loss based on the quantized tensor values
         """
         # Compute the loss directly on all tensor values
-        loss = torch.log2(2 * self.quant_max * torch.abs(tensor) + 1).sum()
+        loss = torch.log2(2 * self.quant_max * torch.abs(tensor) + 1)
 
-        return loss
+        if active_masks is not None:
+            # Mask out inactive agents
+            # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(tensor)
+            loss = loss * mask_expanded
+            return torch.sum(loss)
+        else:
+            return torch.sum(loss)
 
-    def compute_quantization_bits(self, tensor):
+    def compute_quantization_bits(self, tensor, active_masks=None):
         """
         Compute the actual bits used based on the tensor values
         """
-        # Count total number of values in the tensor
-        num_values = tensor.numel()
-
-        # Each value uses quant_bits bits
-        total_bits = self.quant_bits * num_values
+        if active_masks is not None:
+            # Only count bits for active agents
+            # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(tensor)
+            active_values = torch.sum(mask_expanded)
+            total_bits = self.quant_bits * active_values
+        else:
+            # Count total number of values in the tensor
+            num_values = tensor.numel()
+            # Each value uses quant_bits bits
+            total_bits = self.quant_bits * num_values
 
         return total_bits
 
-    def forward(self, key, value, query):
+    def forward(self, key, value, query, active_masks=None):
         B, L, D = query.size()
 
         # Reset communication metrics for this forward pass
@@ -141,15 +170,15 @@ class SelfAttention(nn.Module):
             k = k + k_noise
 
             # Track communication metrics for keys
-            self.comm_loss += self.compute_component_log_loss(k)
-            self.comm_bits += self.compute_num_bits_used(k)
+            self.comm_loss += self.compute_component_log_loss(k, active_masks)
+            self.comm_bits += self.compute_num_bits_used(k, active_masks)
 
         elif self.use_fake_quantization:
             k = self.apply_fake_quantization(k)
 
             # Track communication metrics for keys
-            self.comm_loss += self.compute_quantization_loss(k)
-            self.comm_bits += self.compute_quantization_bits(k)
+            self.comm_loss += self.compute_quantization_loss(k, active_masks)
+            self.comm_bits += self.compute_quantization_bits(k, active_masks)
 
         # causal attention: (B, nh, L, hs) x (B, nh, hs, L) -> (B, nh, L, L)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -157,7 +186,22 @@ class SelfAttention(nn.Module):
         if self.masked:
             raise NotImplementedError("Masked attention is not supported in this implementation.")
 
+        # Apply active masks if provided
+        if active_masks is not None:
+            # active_masks shape: [B, L, 1]
+            # Create attention mask: [B, 1, L, 1] -> [B, nh, L, L]
+            mask = active_masks.squeeze(-1).unsqueeze(1).unsqueeze(1)  # [B, 1, 1, L]
+            mask = mask.expand(-1, self.n_head, L, -1)  # [B, nh, L, L]
+            mask_t = mask.transpose(-2, -1)  # [B, nh, L, L]
+            combined_mask = mask * mask_t  # Both query and key must be active
+            # Set attention to -inf where either query or key agent is inactive
+            att = att.masked_fill(combined_mask == 0, float('-inf'))
+
         att = F.softmax(att, dim=-1)
+        
+        # Handle NaN from softmax of all -inf (when all agents are inactive)
+        if active_masks is not None:
+            att = torch.nan_to_num(att, nan=0.0)
 
         y = att @ v  # (B, nh, L, L) x (B, nh, L, hs) -> (B, nh, L, hs)
         y = y.transpose(1, 2).contiguous().view(B, L, D)  # re-assemble all head outputs side by side
@@ -168,15 +212,15 @@ class SelfAttention(nn.Module):
             y = y + y_noise
 
             # Track communication metrics for output
-            self.comm_loss += self.compute_component_log_loss(y)
-            self.comm_bits += self.compute_num_bits_used(y)
+            self.comm_loss += self.compute_component_log_loss(y, active_masks)
+            self.comm_bits += self.compute_num_bits_used(y, active_masks)
 
         elif self.use_fake_quantization:
             y = self.apply_fake_quantization(y)
 
             # Track communication metrics for output
-            self.comm_loss += self.compute_quantization_loss(y)
-            self.comm_bits += self.compute_quantization_bits(y)
+            self.comm_loss += self.compute_quantization_loss(y, active_masks)
+            self.comm_bits += self.compute_quantization_bits(y, active_masks)
 
         # output projection
         y = self.proj(y)
@@ -203,8 +247,8 @@ class EncodeBlock(nn.Module):
             init_(nn.Linear(1 * n_embd, n_embd))
         )
 
-    def forward(self, x):
-        x = self.ln1(x + self.attn(x, x, x))
+    def forward(self, x, active_masks=None):
+        x = self.ln1(x + self.attn(x, x, x, active_masks))
         x = self.ln2(x + self.mlp(x))
         return x
 
@@ -234,7 +278,7 @@ class TransformerEncoderLayer(nn.Module):
                                                  quant_bits=quant_bits)
                                      for _ in range(n_block)])
 
-    def forward(self, obs):
+    def forward(self, obs, active_masks=None):
         # obs: (batch, n_agent, obs_dim)
         obs_embeddings = self.obs_encoder(obs)
         x = obs_embeddings
@@ -245,7 +289,7 @@ class TransformerEncoderLayer(nn.Module):
         total_comm_bits = 0
 
         for block in self.blocks:
-            x = block(x)
+            x = block(x, active_masks)
             comm_loss, comm_bits = block.get_comm_metrics()
             total_comm_loss += comm_loss
             total_comm_bits += comm_bits
@@ -285,12 +329,13 @@ class TransformerEncoderBase(nn.Module):
             quant_bits=quant_bits
         )
 
-    def forward(self, x):
+    def forward(self, x, active_masks=None):
         """
         Forward pass through transformer encoder.
 
         Args:
             x: Input observations (batch, n_agent, obs_dim)
+            active_masks: Optional agent activity mask (batch, n_agent, 1)
 
         Returns:
             If calc_comm_metrics is False:
@@ -299,7 +344,7 @@ class TransformerEncoderBase(nn.Module):
                 - x: Encoded representations
                 - (comm_loss, comm_bits): Communication metrics tuple
         """
-        x, comm_metrics = self.transformer_encoder(x)
+        x, comm_metrics = self.transformer_encoder(x, active_masks)
 
         # Return based on whether communication metrics calculation is enabled
         if self.calc_comm_metrics:

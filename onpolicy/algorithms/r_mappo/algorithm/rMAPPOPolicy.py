@@ -46,7 +46,7 @@ class R_MAPPOPolicy:
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
     def get_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None,
-                    deterministic=False):
+                    deterministic=False, active_masks=None):
         """
         Compute actions and value function predictions for the given inputs.
         :param cent_obs (np.ndarray): centralized input to the critic.
@@ -57,6 +57,7 @@ class R_MAPPOPolicy:
         :param available_actions: (np.ndarray) denotes which actions are available to agent
                                   (if None, all actions available)
         :param deterministic: (bool) whether the action should be mode of distribution or should be sampled.
+        :param active_masks: (np.ndarray) denotes whether an agent is active or dead.
 
         :return values: (torch.Tensor) value function predictions.
         :return actions: (torch.Tensor) actions to take.
@@ -68,7 +69,8 @@ class R_MAPPOPolicy:
                                                                  rnn_states_actor,
                                                                  masks,
                                                                  available_actions,
-                                                                 deterministic)
+                                                                 deterministic,
+                                                                 active_masks=active_masks)
 
         values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks)
         return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
