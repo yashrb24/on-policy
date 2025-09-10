@@ -7,7 +7,7 @@
 env="PredatorPrey"
 scenario="medium"
 algo="rmappo"
-exp="pp-focused-sweep"
+exp="pp-exploratory-run"
 num_agents=5
 num_env_steps=3000000
 episode_length=40
