@@ -49,16 +49,16 @@ LR_VALUES=(1e-4 3e-4 5e-4 1e-3)
 CRITIC_LR_VALUES=(1e-4 3e-4 5e-4 1e-3)
 
 # PPO parameters
-PPO_EPOCH_VALUES=(10 15 20)
-CLIP_PARAM_VALUES=(0.1 0.15 0.2 0.25 0.3)
-NUM_MINI_BATCH_VALUES=(1 2)
-ENTROPY_COEF_VALUES=(0.001 0.005 0.01 0.02 0.05)
-MAX_GRAD_NORM_VALUES=(5.0 10.0 20.0)
+PPO_EPOCH_VALUES=(5 10 15)
+CLIP_PARAM_VALUES=(0.05 0.1 0.2)
+NUM_MINI_BATCH_VALUES=(1)
+ENTROPY_COEF_VALUES=(0.001 0.005 0.01)
+MAX_GRAD_NORM_VALUES=(0.5 10.0)
 
 # Transformer architecture parameters
 N_BLOCK_VALUES=(1 2 3)
 N_EMBD_VALUES=(64 128 256)
-N_HEAD_VALUES=(1 2 4 8)
+N_HEAD_VALUES=(1 2 4)
 
 # =============================================================================
 # EXPERIMENT GENERATION STRATEGY
@@ -101,52 +101,52 @@ generate_phase1_configs() {
 }
 
 # Phase 2: Architecture exploration (with best learning params from phase 1)
-generate_phase2_configs() {
-    local configs=()
-    local best_lr=5e-4  # Update based on phase 1 results
-    local best_entropy=0.01  # Update based on phase 1 results
-    local baseline_clip=0.2
-    local baseline_ppo_epoch=15
-    local baseline_mini_batch=1
-    local baseline_grad_norm=10.0
+# generate_phase2_configs() {
+#     local configs=()
+#     local best_lr=5e-4  # Update based on phase 1 results
+#     local best_entropy=0.01  # Update based on phase 1 results
+#     local baseline_clip=0.2
+#     local baseline_ppo_epoch=15
+#     local baseline_mini_batch=1
+#     local baseline_grad_norm=10.0
     
-    local seed=100
-    for n_block in "${N_BLOCK_VALUES[@]}"; do
-        for n_embd in "${N_EMBD_VALUES[@]}"; do
-            for n_head in "${N_HEAD_VALUES[@]}"; do
-                # Validate architecture
-                if [ $((n_embd % n_head)) -eq 0 ]; then
-                    configs+=("$best_lr $best_lr $best_entropy $baseline_clip $n_block $n_embd $n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
-                    ((seed++))
-                fi
-            done
-        done
-    done
+#     local seed=100
+#     for n_block in "${N_BLOCK_VALUES[@]}"; do
+#         for n_embd in "${N_EMBD_VALUES[@]}"; do
+#             for n_head in "${N_HEAD_VALUES[@]}"; do
+#                 # Validate architecture
+#                 if [ $((n_embd % n_head)) -eq 0 ]; then
+#                     configs+=("$best_lr $best_lr $best_entropy $baseline_clip $n_block $n_embd $n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
+#                     ((seed++))
+#                 fi
+#             done
+#         done
+#     done
     
-    printf '%s\n' "${configs[@]}"
-}
+#     printf '%s\n' "${configs[@]}"
+# }
 
 # Phase 3: PPO parameter fine-tuning (with best architecture from phase 2)
-generate_phase3_configs() {
-    local configs=()
-    local best_lr=5e-4  # Update based on phase 1 results
-    local best_entropy=0.01  # Update based on phase 1 results
-    local best_n_block=2  # Update based on phase 2 results
-    local best_n_embd=128  # Update based on phase 2 results
-    local best_n_head=4  # Update based on phase 2 results
-    local baseline_mini_batch=1
-    local baseline_grad_norm=10.0
+# generate_phase3_configs() {
+#     local configs=()
+#     local best_lr=5e-4  # Update based on phase 1 results
+#     local best_entropy=0.01  # Update based on phase 1 results
+#     local best_n_block=2  # Update based on phase 2 results
+#     local best_n_embd=128  # Update based on phase 2 results
+#     local best_n_head=4  # Update based on phase 2 results
+#     local baseline_mini_batch=1
+#     local baseline_grad_norm=10.0
     
-    local seed=200
-    for clip in "${CLIP_PARAM_VALUES[@]}"; do
-        for ppo_epoch in "${PPO_EPOCH_VALUES[@]}"; do
-            configs+=("$best_lr $best_lr $best_entropy $clip $best_n_block $best_n_embd $best_n_head $ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
-            ((seed++))
-        done
-    done
+#     local seed=200
+#     for clip in "${CLIP_PARAM_VALUES[@]}"; do
+#         for ppo_epoch in "${PPO_EPOCH_VALUES[@]}"; do
+#             configs+=("$best_lr $best_lr $best_entropy $clip $best_n_block $best_n_embd $best_n_head $ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
+#             ((seed++))
+#         done
+#     done
     
-    printf '%s\n' "${configs[@]}"
-}
+#     printf '%s\n' "${configs[@]}"
+# }
 
 # =============================================================================
 # RANDOM STRATEGY CONFIGURATION
