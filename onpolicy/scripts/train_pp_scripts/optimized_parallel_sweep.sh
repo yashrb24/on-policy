@@ -182,18 +182,18 @@ EOF
         if [ "$USE_WANDB" = "true" ]; then
             # Test WandB connection first
             if python3 -c "import wandb; wandb.login()" &>/dev/null; then
-                wandb_args="--use_wandb True --user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
+                wandb_args="--user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
                 log_message "INFO" "Job $job_id: Using WandB online mode"
             elif [ "$WANDB_FALLBACK_TO_OFFLINE" = "true" ]; then
-                wandb_args="--use_wandb True --user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
+                wandb_args="--user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
                 export WANDB_MODE=offline
                 log_message "WARN" "Job $job_id: Using WandB offline mode"
             else
-                wandb_args="--use_wandb False"
+                wandb_args="--use_wandb"
                 log_message "WARN" "Job $job_id: Disabling WandB due to connection issues"
             fi
         else
-            wandb_args="--use_wandb False"
+            wandb_args="--use_wandb"
         fi
 
         CUDA_VISIBLE_DEVICES=$gpu_id python ../train/train_predatorprey.py \
