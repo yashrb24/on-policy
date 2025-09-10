@@ -6,22 +6,22 @@ seed=1
 
 # ENVIRONMENT CONFIGURATION
 env="TrafficJunction"
-difficulty="easy"
-num_agents=5
-dim=6
+difficulty="medium"
+num_agents=10
+dim=14
 vision=1
 
 # Curriculum settings
-add_rate_min=0.3
-add_rate_max=0.3
-curr_start=0
-curr_end=0
+add_rate_min=1.0
+add_rate_max=1.0
+curr_start=1
+curr_end=1
 
 # TRAINING CONFIGURATION
 algo="rmappo"
-num_env_steps=40000
-episode_length=20
-n_rollout_threads=2
+num_env_steps=120000
+episode_length=80
+n_rollout_threads=1
 
 # PPO hyperparameters
 ppo_epoch=10

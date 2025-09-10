@@ -174,6 +174,7 @@ class TrafficJunctionEnv(gym.Env):
 
         self.episode_over = False
         self.has_failed = 0
+        self.num_steps = 0
 
         self.alive_mask = np.zeros(self.ncar)
         self.wait = np.zeros(self.ncar)

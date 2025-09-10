@@ -22,7 +22,6 @@ class TrafficJunctionRunner(Runner):
         
         # Initialize episode trackers for each parallel environment
         self.episode_rewards = np.zeros(self.n_rollout_threads)
-        self.episode_steps = np.zeros(self.n_rollout_threads, dtype=int)
 
     def run(self):
         self.warmup()
@@ -99,7 +98,11 @@ class TrafficJunctionRunner(Runner):
 
         # Get active masks from previous step for attention masking
         # For the first step, use default active masks (all agents active)
-        active_masks_prev = np.concatenate(self.buffer.active_masks[step - 1 if step > 0 else 0])
+        if step > 0:
+            active_masks_prev = self.buffer.active_masks[step - 1]
+        else:
+            active_masks_prev = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
+
 
         # [n_envs, n_agents, ...] -> [n_envs*n_agents, ...]
         values, actions, action_log_probs, rnn_states, rnn_states_critic = self.trainer.policy.get_actions(
@@ -127,27 +130,23 @@ class TrafficJunctionRunner(Runner):
 
         # get environment-level dones
         dones_env = np.all(dones, axis=-1)
-        
+
         # Accumulate rewards for each environment and track episode completion
         for i in range(self.n_rollout_threads):
             # Add current step rewards
-            self.episode_rewards[i] += np.sum(rewards[i])
-            self.episode_steps[i] += 1
-            
+            self.episode_rewards[i] += np.mean(rewards[i])
+
             # Check if episode ended
             if dones_env[i]:
                 # Record episode statistics ONLY when episode completes
                 self.env_infos["episode_rewards"].append(self.episode_rewards[i])
 
-                # Extract traffic-specific metrics from info dict
-                if isinstance(infos[i], dict):
-                    # Success rate (episodes without crashes)
-                    success = infos[i].get('success', 0)
-                    self.env_infos["success_rate"].append(float(success))
+                # Success rate (episodes without crashes)
+                success = infos[i].get('success', 0)
+                self.env_infos["win_rate"].append(float(success))
                 
                 # Reset trackers for next episode
                 self.episode_rewards[i] = 0.0
-                self.episode_steps[i] = 0
 
 
         # reset rnn and mask args for done envs
@@ -194,6 +193,7 @@ class TrafficJunctionRunner(Runner):
                     wandb.log({k: np.mean(v)}, step=total_num_steps)
                 else:
                     self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
+                print(f"Average {k} for last {len(v)} episodes: {np.mean(v)}")
 
     @torch.no_grad()
     def eval(self, total_num_steps):

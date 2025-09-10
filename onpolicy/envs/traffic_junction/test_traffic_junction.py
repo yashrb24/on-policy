@@ -79,7 +79,7 @@ def test_environment_basics():
         actions = [np.random.choice([0, 1]) for _ in range(args.num_agents)]
         
         obs, rewards, done, info = env.step(actions)
-        total_reward += rewards
+        total_reward += rewards.mean(axis=-1)
         
         print(f"Step {step + 1}: Actions={actions}, Rewards={rewards}, "
               f"Cars in system={info.get('cars_in_sys', 0)}")
