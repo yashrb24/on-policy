@@ -104,7 +104,6 @@ run_focused_experiment() {
         --n_block ${n_block} \
         --n_embd ${n_embd} \
         --n_head ${n_head} \
-        --use_wandb True \
         --user_name "yashrb" \
         --wandb_name "on-policy" \
         2>&1 | tee "logs/${exp_name}.log"
