@@ -177,6 +177,25 @@ EOF
         # Set process limits if needed
         # ulimit -v 8000000  # Limit virtual memory to 8GB
         
+        # Handle WandB with fallback
+        local wandb_args=""
+        if [ "$USE_WANDB" = "true" ]; then
+            # Test WandB connection first
+            if python3 -c "import wandb; wandb.login()" &>/dev/null; then
+                wandb_args="--use_wandb True --user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
+                log_message "INFO" "Job $job_id: Using WandB online mode"
+            elif [ "$WANDB_FALLBACK_TO_OFFLINE" = "true" ]; then
+                wandb_args="--use_wandb True --user_name $WANDB_USER --wandb_name $WANDB_PROJECT"
+                export WANDB_MODE=offline
+                log_message "WARN" "Job $job_id: Using WandB offline mode"
+            else
+                wandb_args="--use_wandb False"
+                log_message "WARN" "Job $job_id: Disabling WandB due to connection issues"
+            fi
+        else
+            wandb_args="--use_wandb False"
+        fi
+
         CUDA_VISIBLE_DEVICES=$gpu_id python ../train/train_predatorprey.py \
             --env_name "$ENV_NAME" \
             --scenario_name "$SCENARIO_NAME" \
@@ -203,9 +222,7 @@ EOF
             --n_block "$n_block" \
             --n_embd "$n_embd" \
             --n_head "$n_head" \
-            # --use_wandb "$USE_WANDB" \
-            --user_name "$WANDB_USER" \
-            --wandb_name "$WANDB_PROJECT" \
+            $wandb_args \
             2>&1 | tee "$log_file"
         
         local exit_code=${PIPESTATUS[0]}
@@ -224,8 +241,13 @@ start_time=$start_time
 end_time=$end_time
 runtime_seconds=$runtime
 gpu_id=$gpu_id
+wandb_project=$WANDB_PROJECT
+wandb_run_name=$unique_run_name
 config=$config
 EOF
+        
+        # Clean up isolated WandB cache
+        rm -rf "$wandb_cache_dir"
         
         # Update job tracking
         grep -v "^$job_id$" "$ACTIVE_JOBS" > "${ACTIVE_JOBS}.tmp" && mv "${ACTIVE_JOBS}.tmp" "$ACTIVE_JOBS"
