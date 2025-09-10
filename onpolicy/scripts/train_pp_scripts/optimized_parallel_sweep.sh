@@ -203,7 +203,7 @@ EOF
             --n_block "$n_block" \
             --n_embd "$n_embd" \
             --n_head "$n_head" \
-            --use_wandb "$USE_WANDB" \
+            # --use_wandb "$USE_WANDB" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee "$log_file"
