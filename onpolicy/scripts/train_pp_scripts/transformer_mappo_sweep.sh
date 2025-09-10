@@ -7,7 +7,7 @@
 env="PredatorPrey"
 scenario="medium"
 algo="rmappo"
-exp="pp-exploratory-run"
+exp="pp-focused-sweep"
 num_agents=5
 num_env_steps=3000000
 episode_length=40
@@ -18,7 +18,7 @@ lr_values=(1e-4 3e-4 5e-4 1e-3)
 critic_lr_values=(1e-4 3e-4 5e-4 1e-3)
 
 # PPO parameters: Essential for policy optimization
-entropy_coef_values=(0.001 0.005 0.01 0.02 0.05)  # Higher entropy may help exploration
+entropy_coef_values=(0.001 0.005 0.01 0.02)  # Higher entropy may help exploration
 clip_param_values=(0.05 0.1 0.2)        # Affects policy update stability
 
 # Transformer architecture: Core to your model
@@ -29,7 +29,7 @@ n_head_values=(1 2 4)                           # Multi-head attention for diffe
 # Secondary importance parameters
 ppo_epoch_values=(5 10 15)                          # Keep moderate values
 num_mini_batch_values=(1)                       # Simpler values for stability
-max_grad_norm_values=(0.5 5.0 10.0)                   # Conservative gradient clipping
+max_grad_norm_values=(0.5 10.0)                   # Conservative gradient clipping
 
 echo "Starting focused hyperparameter sweep..."
 echo "Targeting high-impact parameters based on multi-agent communication research"
@@ -93,6 +93,7 @@ run_focused_experiment() {
         --save_interval 200 \
         --log_interval 200 \
         --use_transformer_base_actor \
+        --hidden_size ${n_embd} \
         --lr ${lr} \
         --critic_lr ${critic_lr} \
         --ppo_epoch ${ppo_epoch} \
@@ -180,11 +181,11 @@ done
 #     run_focused_experiment $best_lr $best_critic_lr $best_entropy_coef $clip_param $best_n_block $best_n_embd $best_n_head $ppo_epoch $num_mini_batch $max_grad_norm $seed
 # done
 
-echo "=========================================="
-echo "Focused hyperparameter sweep completed!"
-echo "Check your wandb dashboard and logs/ directory for results."
-echo "Recommended next steps:"
-echo "1. Analyze phase 1 results to identify best learning rate and entropy combinations"
-echo "2. Use phase 2 results to select optimal transformer architecture"
-echo "3. Apply phase 3 findings for final clip_param tuning"
-echo "=========================================="
+# echo "=========================================="
+# echo "Focused hyperparameter sweep completed!"
+# echo "Check your wandb dashboard and logs/ directory for results."
+# echo "Recommended next steps:"
+# echo "1. Analyze phase 1 results to identify best learning rate and entropy combinations"
+# echo "2. Use phase 2 results to select optimal transformer architecture"
+# echo "3. Apply phase 3 findings for final clip_param tuning"
+# echo "=========================================="
