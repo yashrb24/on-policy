@@ -1,0 +1,97 @@
+# WandB Sweep Configuration for Football 3v1 Multi-Agent RL
+# This sweep includes early stopping based on win_rate metric
+
+program: train_football.py
+method: bayes  # Using Bayesian optimization for more efficient search
+metric:
+  name: win_rate
+  goal: maximize
+
+# Early stopping configuration
+early_terminate:
+  type: hyperband
+  s: 2  # Maximum early stopping factor
+  eta: 3  # Halving rate
+  max_iter: 27  # Maximum iterations per configuration
+
+# Parameter search space
+parameters:
+  # Environment and base configuration (fixed)
+  env_name:
+    value: Football
+  scenario_name:
+    value: academy_3_vs_1_with_keeper
+  algorithm_name:
+    value: rmappo
+  num_agents:
+    value: 3
+  num_env_steps:
+    value: 15000000
+  episode_length:
+    value: 200
+  representation:
+    value: simple115v2
+  rewards:
+    value: scoring
+  n_rollout_threads:
+    value: 50
+  save_interval:
+    value: 20000
+  log_interval:
+    value: 20000
+  use_transformer_base_actor:
+    value: true
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: on-policy
+  
+  # High-impact parameters to sweep
+  lr:
+    values: [0.0001, 0.0003, 0.0005, 0.001]
+    
+  critic_lr:
+    values: [0.0001, 0.0003, 0.0005, 0.001]
+    
+  entropy_coef:
+    values: [0.001, 0.005, 0.01, 0.02]
+    
+  clip_param:
+    values: [0.05, 0.1, 0.2]
+  
+  # Transformer architecture parameters
+  n_block:
+    values: [1, 2, 3]
+    
+  n_embd:
+    values: [64, 128, 256]
+    
+  n_head:
+    values: [1, 2, 4]
+  
+  # Secondary parameters
+  ppo_epoch:
+    values: [5, 10, 15]
+    
+  num_mini_batch:
+    value: 1  # Fixed as per your configuration
+    
+  max_grad_norm:
+    values: [0.5, 10.0]
+  
+  # Seed for reproducibility
+  seed:
+    distribution: int_uniform
+    min: 1
+    max: 5
+  
+  # Hidden size should match n_embd
+  hidden_size:
+    values: [64, 128, 256]
+
+# Command template for the sweep agent
+command:
+  - ${env}
+  - python
+  - ../train/train_football.py
+  - ${args}

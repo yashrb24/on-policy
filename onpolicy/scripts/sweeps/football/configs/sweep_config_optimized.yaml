@@ -1,0 +1,105 @@
+# WandB Sweep Configuration for Football 3v1 Multi-Agent RL
+# Optimized version with early stopping and architecture constraints
+
+program: sweep_wrapper.py  # Using our wrapper script for validation
+method: bayes  # Bayesian optimization for efficient search
+name: football-3v1-transformer-sweep
+
+# Metric configuration
+metric:
+  name: win_rate
+  goal: maximize
+
+# Early stopping configuration - stop poorly performing runs early
+early_terminate:
+  type: hyperband
+  min_iter: 3  # Minimum iterations before considering early stopping
+  s: 2  # Maximum early stopping factor
+  eta: 3  # Halving rate
+
+# Parameter search space
+parameters:
+  # Environment and base configuration (fixed)
+  env_name:
+    value: Football
+  scenario_name:
+    value: academy_3_vs_1_with_keeper
+  algorithm_name:
+    value: rmappo
+  num_agents:
+    value: 3
+  num_env_steps:
+    value: 15000000
+  episode_length:
+    value: 200
+  representation:
+    value: simple115v2
+  rewards:
+    value: scoring
+  n_rollout_threads:
+    value: 50
+  save_interval:
+    value: 20000
+  log_interval:
+    value: 20000
+  use_transformer_base_actor:
+    value: true
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: on-policy
+  num_mini_batch:
+    value: 1
+  
+  # Primary hyperparameters - Critical for performance
+  lr:
+    distribution: categorical
+    values: [0.0001, 0.0003, 0.0005, 0.001]
+    
+  critic_lr:
+    distribution: categorical
+    values: [0.0001, 0.0003, 0.0005, 0.001]
+    
+  entropy_coef:
+    distribution: categorical
+    values: [0.001, 0.005, 0.01, 0.02]
+    
+  clip_param:
+    distribution: categorical
+    values: [0.05, 0.1, 0.2]
+  
+  # Transformer architecture - Using valid combinations only
+  # We'll handle the divisibility constraint in the wrapper
+  n_block:
+    distribution: categorical
+    values: [1, 2, 3]
+    
+  n_embd:
+    distribution: categorical
+    values: [64, 128, 256]
+    
+  n_head:
+    distribution: categorical
+    values: [1, 2, 4]
+  
+  # Secondary parameters
+  ppo_epoch:
+    distribution: categorical
+    values: [5, 10, 15]
+    
+  max_grad_norm:
+    distribution: categorical
+    values: [0.5, 10.0]
+  
+  # Random seed for reproducibility
+  seed:
+    distribution: int_uniform
+    min: 1
+    max: 5
+
+# Command configuration
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}

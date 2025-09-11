@@ -1,3 +1,5 @@
+**/logs/
+**/results/
 .serena/
 **/nohup.out
 .idea
