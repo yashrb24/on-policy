@@ -1,48 +1,41 @@
 #!/usr/bin/env python3
 """
 WandB Sweep Wrapper for Football Multi-Agent RL Training
-This script handles architecture validation and parameter filtering
 """
 
-import wandb
-import subprocess
 import sys
 import os
 from pathlib import Path
 
-def validate_architecture(config):
-    """
-    Validate that n_embd is divisible by n_head
-    """
-    n_embd = config.get('n_embd', 128)
-    n_head = config.get('n_head', 4)
-    
-    if n_embd % n_head != 0:
-        print(f"Invalid architecture: n_embd={n_embd} not divisible by n_head={n_head}")
-        return False
-    return True
+# Add the training script directory to path
+train_path = Path(__file__).parent / "../../train"
+sys.path.insert(0, str(train_path.resolve()))
+
+import wandb
+
+def validate_architecture(n_embd, n_head):
+    """Validate that n_embd is divisible by n_head"""
+    return n_embd % n_head == 0
 
 def run_training():
-    """
-    Main function to run training with WandB sweep
-    """
-    # Initialize wandb
-    run = wandb.init()
+    # Initialize wandb if not already done (when called by sweep agent, this connects to existing run)
+    if wandb.run is None:
+        wandb.init()
+    
+    # Now we can access config
     config = wandb.config
     
     # Validate architecture
-    if not validate_architecture(config):
-        # Mark this run as failed/skipped
+    if not validate_architecture(config.n_embd, config.n_head):
+        print(f"Invalid architecture: n_embd={config.n_embd} not divisible by n_head={config.n_head}")
         wandb.run.summary["invalid_architecture"] = True
-        wandb.finish(exit_code=1)
         return
     
-    # Ensure hidden_size matches n_embd
-    config.update({'hidden_size': config.n_embd}, allow_val_change=True)
+    # Import the training module
+    from train_football import main
     
-    # Build command
-    cmd = [
-        'python', '../train/train_football.py',
+    # Build arguments as a list (like command line args)
+    args_list = [
         '--env_name', str(config.env_name),
         '--scenario_name', str(config.scenario_name),
         '--algorithm_name', str(config.algorithm_name),
@@ -57,7 +50,7 @@ def run_training():
         '--save_interval', str(config.save_interval),
         '--log_interval', str(config.log_interval),
         '--use_transformer_base_actor',
-        '--hidden_size', str(config.n_embd),  # Use n_embd for hidden_size
+        '--hidden_size', str(config.n_embd),
         '--lr', str(config.lr),
         '--critic_lr', str(config.critic_lr),
         '--ppo_epoch', str(config.ppo_epoch),
@@ -72,32 +65,23 @@ def run_training():
         '--wandb_name', str(config.wandb_name),
     ]
     
-    # Set CUDA device (you can modify this for multi-GPU setups)
-    env = os.environ.copy()
-    env['CUDA_VISIBLE_DEVICES'] = '0'
+    # Set CUDA device if needed
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     
-    print(f"Running command: {' '.join(cmd)}")
+    print(f"Starting training with sweep config:")
+    print(f"  lr={config.lr}, critic_lr={config.critic_lr}")
+    print(f"  entropy_coef={config.entropy_coef}, clip_param={config.clip_param}")
+    print(f"  n_block={config.n_block}, n_embd={config.n_embd}, n_head={config.n_head}")
     
-    # Run the training script
+    # Call the main function directly
     try:
-        result = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(result.stdout)
-        if result.stderr:
-            print("Warnings/Errors:", result.stderr)
-    except subprocess.CalledProcessError as e:
-        print(f"Training failed with exit code {e.returncode}")
-        print(f"Error output: {e.stderr}")
-        wandb.finish(exit_code=e.returncode)
-        sys.exit(e.returncode)
-    
-    # Finish the wandb run
-    wandb.finish()
+        main(args_list)
+        print(f"Training completed successfully for run {wandb.run.id}")
+    except Exception as e:
+        print(f"Training failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     run_training()

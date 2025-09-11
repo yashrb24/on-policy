@@ -152,19 +152,29 @@ def main(args):
 
     # wandb
     if all_args.use_wandb:
-        run = wandb.init(config=all_args,
-                         project=all_args.env_name,
-                         entity=all_args.user_name,
-                         notes=socket.gethostname(),
-                         name="-".join([
-                            all_args.algorithm_name,
-                            all_args.experiment_name,
-                            "seed" + str(all_args.seed)
-                         ]),
-                         group=all_args.scenario_name,
-                         dir=str(run_dir),
-                         job_type="training",
-                         reinit=True)
+        # Check if we're already in a wandb run (from sweep)
+        if wandb.run is not None:
+            # We're in a sweep - wandb is already initialized
+            print(f"Detected WandB sweep run: {wandb.run.id}")
+            # Update the config with all_args
+            wandb.config.update(vars(all_args), allow_val_change=True)
+            run = wandb.run
+        else:
+            # Standalone run - initialize wandb normally
+            print("Initializing new WandB run")
+            run = wandb.init(config=all_args,
+                            project=all_args.env_name,
+                            entity=all_args.user_name,
+                            notes=socket.gethostname(),
+                            name="-".join([
+                                all_args.algorithm_name,
+                                all_args.experiment_name,
+                                "seed" + str(all_args.seed)
+                            ]),
+                            group=all_args.scenario_name,
+                            dir=str(run_dir),
+                            job_type="training",
+                            reinit=True)
     else:
         if not run_dir.exists():
             curr_run = 'run1'
@@ -219,7 +229,9 @@ def main(args):
         eval_envs.close()
 
     if all_args.use_wandb:
-        run.finish()
+        # Don't call finish() if we're in a sweep - the agent handles it
+        if wandb.run and wandb.run.sweep_id is None:
+            run.finish()
     else:
         runner.writter.export_scalars_to_json(str(runner.log_dir + '/summary.json'))
         runner.writter.close()

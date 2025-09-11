@@ -11,11 +11,11 @@ metric:
   goal: maximize
 
 # Early stopping configuration - stop poorly performing runs early
-early_terminate:
-  type: hyperband
-  min_iter: 3  # Minimum iterations before considering early stopping
-  s: 2  # Maximum early stopping factor
-  eta: 3  # Halving rate
+# early_terminate:
+#   type: hyperband
+#   min_iter: 3  # Minimum iterations before considering early stopping
+#   s: 2  # Maximum early stopping factor
+#   eta: 3  # Halving rate
 
 # Parameter search space
 parameters:
@@ -39,9 +39,9 @@ parameters:
   n_rollout_threads:
     value: 50
   save_interval:
-    value: 20000
+    value: 40000
   log_interval:
-    value: 20000
+    value: 40000
   use_transformer_base_actor:
     value: true
   user_name:
@@ -89,7 +89,7 @@ parameters:
     
   max_grad_norm:
     distribution: categorical
-    values: [0.5, 10.0]
+    values: [0.5, 5.0]
   
   # Random seed for reproducibility
   seed:
