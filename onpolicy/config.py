@@ -335,6 +335,8 @@ def get_config():
     # add for communication channel in transformer
     parser.add_argument("--use_comms_channel", action='store_true', default=False,
                         help="Whether to use communication channel with noise in transformer encoder of actor")
+    parser.add_argument("--use_active_masks_in_transformer", action='store_true', default=False,
+                        help="Whether to pass active masks to transformer encoder (default: False)")
     parser.add_argument("--num_messages", type=int, default=15,
                         help="Number of messages for communication channel quantization (default: 15)")
     parser.add_argument("--comm_coeff", type=float, default=0.0001,

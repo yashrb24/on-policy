@@ -51,6 +51,7 @@ class R_Actor(nn.Module):
         self._use_recurrent_policy = args.use_recurrent_policy
         self._recurrent_N = args.recurrent_N
         self.use_transformer_base_actor = args.use_transformer_base_actor
+        self.use_active_masks_in_transformer = args.use_active_masks_in_transformer
         self.tpdv = dict(dtype=torch.float32, device=device)
 
         obs_shape = get_shape_from_obs_space(obs_space)
@@ -106,13 +107,14 @@ class R_Actor(nn.Module):
             # Prepare active_masks for transformer (needs shape [batch, agents, 1])
             if active_masks is not None:
                 # Currently shape is flattened, reshape to [batch, agents, 1]
-                active_masks_transformer = active_masks.reshape(
+                active_masks = active_masks.reshape(
                     batch_size // self.num_agents, self.num_agents, -1
                 )
-            else:
-                active_masks_transformer = None
 
-            base_output = self.base(obs_reshaped, active_masks=active_masks_transformer)
+            if self.use_active_masks_in_transformer:
+                base_output = self.base(obs_reshaped, active_masks=active_masks)
+            else:
+                base_output = self.base(obs_reshaped)
 
             # Handle communication metrics if transformer returns them
             if isinstance(base_output, tuple):
@@ -161,24 +163,14 @@ class R_Actor(nn.Module):
             if self.use_transformer_base_actor:
                 available_actions = available_actions.reshape(-1, available_actions.shape[-1])
 
-        if active_masks is not None:
-            active_masks = check(active_masks).to(**self.tpdv)
-            if self.use_transformer_base_actor:
-                active_masks = active_masks.reshape(-1, active_masks.shape[-1])
-
         comm_metrics = None
         if self.use_transformer_base_actor:
-            # Prepare active_masks for transformer (needs shape [batch, agents, 1])
-            if active_masks is not None:
-                # Currently shape is flattened, reshape to [batch, agents, 1]
-                active_masks_transformer = active_masks.reshape(
-                    obs.shape[0] // self.num_agents, self.num_agents, -1
-                )
+
+            if self.use_active_masks_in_transformer:
+                base_output = self.base(obs, active_masks)
             else:
-                active_masks_transformer = None
-            
-            base_output = self.base(obs, active_masks_transformer)
-            
+                base_output = self.base(obs)
+
             # Handle communication metrics if transformer returns them
             if isinstance(base_output, tuple):
                 actor_features, comm_metrics = base_output
@@ -194,7 +186,11 @@ class R_Actor(nn.Module):
                 actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
             else:
                 actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
-                
+
+        if active_masks is not None:
+            active_masks = check(active_masks).to(**self.tpdv)
+            if self.use_transformer_base_actor:
+                active_masks = active_masks.reshape(-1, active_masks.shape[-1])
 
         if self.algo == "hatrpo":
             action_log_probs, dist_entropy ,action_mu, action_std, all_probs= self.act.evaluate_actions_trpo(actor_features,
