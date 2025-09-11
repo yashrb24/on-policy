@@ -79,52 +79,52 @@ GRID_SAMPLE_RATE=0.1  # Sample 10% of all combinations
 # =============================================================================
 
 # Phase 1: Learning rate and entropy combinations (with baseline architecture)
-# generate_phase1_configs() {
-#     local configs=()
-#     local baseline_clip=0.2
-#     local baseline_n_block=2
-#     local baseline_n_embd=128
-#     local baseline_n_head=4
-#     local baseline_ppo_epoch=15
-#     local baseline_mini_batch=1
-#     local baseline_grad_norm=10.0
-    
-#     local seed=1
-#     for lr in "${LR_VALUES[@]}"; do
-#         for entropy in "${ENTROPY_COEF_VALUES[@]}"; do
-#             configs+=("$lr $lr $entropy $baseline_clip $baseline_n_block $baseline_n_embd $baseline_n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
-#             ((seed++))
-#         done
-#     done
-    
-#     printf '%s\n' "${configs[@]}"
-# }
-
-# Phase 2: Architecture exploration (with best learning params from phase 1)
-generate_phase2_configs() {
+generate_phase1_configs() {
     local configs=()
-    local best_lr=1e-4  # Update based on phase 1 results
-    local best_entropy=0.01  # Update based on phase 1 results
     local baseline_clip=0.2
-    local baseline_ppo_epoch=15
+    local baseline_n_block=2
+    local baseline_n_embd=64
+    local baseline_n_head=4
+    local baseline_ppo_epoch=10
     local baseline_mini_batch=1
     local baseline_grad_norm=10.0
     
-    local seed=100
-    for n_block in "${N_BLOCK_VALUES[@]}"; do
-        for n_embd in "${N_EMBD_VALUES[@]}"; do
-            for n_head in "${N_HEAD_VALUES[@]}"; do
-                # Validate architecture
-                if [ $((n_embd % n_head)) -eq 0 ]; then
-                    configs+=("$best_lr $best_lr $best_entropy $baseline_clip $n_block $n_embd $n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
-                    ((seed++))
-                fi
-            done
+    local seed=1
+    for lr in "${LR_VALUES[@]}"; do
+        for entropy in "${ENTROPY_COEF_VALUES[@]}"; do
+            configs+=("$lr $lr $entropy $baseline_clip $baseline_n_block $baseline_n_embd $baseline_n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
+            ((seed++))
         done
     done
     
     printf '%s\n' "${configs[@]}"
 }
+
+# Phase 2: Architecture exploration (with best learning params from phase 1)
+# generate_phase2_configs() {
+#     local configs=()
+#     local best_lr=1e-4  # Update based on phase 1 results
+#     local best_entropy=0.01  # Update based on phase 1 results
+#     local baseline_clip=0.2
+#     local baseline_ppo_epoch=15
+#     local baseline_mini_batch=1
+#     local baseline_grad_norm=10.0
+    
+#     local seed=100
+#     for n_block in "${N_BLOCK_VALUES[@]}"; do
+#         for n_embd in "${N_EMBD_VALUES[@]}"; do
+#             for n_head in "${N_HEAD_VALUES[@]}"; do
+#                 # Validate architecture
+#                 if [ $((n_embd % n_head)) -eq 0 ]; then
+#                     configs+=("$best_lr $best_lr $best_entropy $baseline_clip $n_block $n_embd $n_head $baseline_ppo_epoch $baseline_mini_batch $baseline_grad_norm $seed")
+#                     ((seed++))
+#                 fi
+#             done
+#         done
+#     done
+    
+#     printf '%s\n' "${configs[@]}"
+# }
 
 # Phase 3: PPO parameter fine-tuning (with best architecture from phase 2)
 # generate_phase3_configs() {
