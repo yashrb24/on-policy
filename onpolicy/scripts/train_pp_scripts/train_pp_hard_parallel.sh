@@ -42,7 +42,7 @@ COMM_COEFF="1e-2"
 # --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
-QUANT_BITS="4"
+QUANT_BITS="16"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
