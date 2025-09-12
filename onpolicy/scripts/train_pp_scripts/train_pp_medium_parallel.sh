@@ -12,7 +12,7 @@ ENV_NAME="PredatorPrey"
 SCENARIO_NAME="medium"
 ALGORITHM_NAME="rmappo"
 # "pp-medium-best-config"/ "pp-medium-ddcl-config"/ "pp-medium-fakequant-config"
-EXPERIMENT_NAME="pp-medium-ddcl-config"
+EXPERIMENT_NAME="pp-medium-fakequant-config"
 NUM_AGENTS=5
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -167,8 +167,8 @@ run_seed_experiment() {
             --n_block "$BEST_N_BLOCK" \
             --n_embd "$BEST_N_EMBD" \
             --n_head "$BEST_N_HEAD" \
-            --use_comms_channel \
-            --comm_coeff "$COMM_COEFF" \
+            --use_fake_quantization \
+            --quant_bits "$QUANT_BITS" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
