@@ -73,6 +73,10 @@ cmd="python /Users/yashrb/Projects/on-policy/onpolicy/scripts/train/train_traffi
     --n_head ${n_head} \
     --hidden_size ${hidden_size} \
     --lr ${lr} \
+    --use_transformer_base_actor \
+    --use_active_masks_in_transformer \
+    --n_embd 128 \
+    --use_fake_quantization \
     --use_wandb ${use_wandb}"
 
 # Add WandB parameters if enabled

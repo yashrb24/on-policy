@@ -16,7 +16,7 @@ def init_(m, gain=0.01, activate=False):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=256,
+    def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=15,
                  use_fake_quantization=False, quant_bits=8):
         super(SelfAttention, self).__init__()
 
@@ -68,8 +68,17 @@ class SelfAttention(nn.Module):
 
         if active_masks is not None:
             # Mask out inactive agents
-            # z shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
-            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(z)
+            # Handle both 3D and 4D tensor shapes
+            if z.dim() == 4:
+                # z shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.unsqueeze(1).expand(batch_size, z.size(1), z.size(2), 1)
+                mask_expanded = mask_expanded.expand_as(z)
+            elif z.dim() == 3:
+                # z shape: [B, L, D], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.expand_as(z)
+            else:
+                raise ValueError(f"Expected 3D or 4D tensor, got {z.dim()}D")
+
             loss = loss * mask_expanded
             # Average only over active agents
             active_elements = torch.sum(mask_expanded)
@@ -85,8 +94,17 @@ class SelfAttention(nn.Module):
         bits_used = torch.ones_like(target) * 32  # float32
         if active_masks is not None:
             # Expand masks to match target dimensions
-            # target shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
-            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(target)
+            # Handle both 3D and 4D tensor shapes
+            if target.dim() == 4:
+                # target shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.unsqueeze(1).expand(target.size(0), target.size(1), target.size(2), 1)
+                mask_expanded = mask_expanded.expand_as(target)
+            elif target.dim() == 3:
+                # target shape: [B, L, D], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.expand_as(target)
+            else:
+                raise ValueError(f"Expected 3D or 4D tensor, got {target.dim()}D")
+
             bits_used = bits_used * mask_expanded
         return torch.sum(bits_used)
 
@@ -126,8 +144,17 @@ class SelfAttention(nn.Module):
 
         if active_masks is not None:
             # Mask out inactive agents
-            # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
-            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(tensor)
+            # Handle both 3D and 4D tensor shapes
+            if tensor.dim() == 4:
+                # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.unsqueeze(1).expand(tensor.size(0), tensor.size(1), tensor.size(2), 1)
+                mask_expanded = mask_expanded.expand_as(tensor)
+            elif tensor.dim() == 3:
+                # tensor shape: [B, L, D], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.expand_as(tensor)
+            else:
+                raise ValueError(f"Expected 3D or 4D tensor, got {tensor.dim()}D")
+
             loss = loss * mask_expanded
             return torch.sum(loss)
         else:
@@ -139,8 +166,17 @@ class SelfAttention(nn.Module):
         """
         if active_masks is not None:
             # Only count bits for active agents
-            # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
-            mask_expanded = active_masks.unsqueeze(1).unsqueeze(-1).expand_as(tensor)
+            # Handle both 3D and 4D tensor shapes
+            if tensor.dim() == 4:
+                # tensor shape: [B, nh, L, hs], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.unsqueeze(1).expand(tensor.size(0), tensor.size(1), tensor.size(2), 1)
+                mask_expanded = mask_expanded.expand_as(tensor)
+            elif tensor.dim() == 3:
+                # tensor shape: [B, L, D], active_masks shape: [B, L, 1]
+                mask_expanded = active_masks.expand_as(tensor)
+            else:
+                raise ValueError(f"Expected 3D or 4D tensor, got {tensor.dim()}D")
+
             active_values = torch.sum(mask_expanded)
             total_bits = self.quant_bits * active_values
         else:
@@ -198,7 +234,7 @@ class SelfAttention(nn.Module):
             att = att.masked_fill(combined_mask == 0, float('-inf'))
 
         att = F.softmax(att, dim=-1)
-        
+
         # Handle NaN from softmax of all -inf (when all agents are inactive)
         if active_masks is not None:
             att = torch.nan_to_num(att, nan=0.0)
@@ -230,7 +266,7 @@ class SelfAttention(nn.Module):
 class EncodeBlock(nn.Module):
     """ an unassuming Transformer block """
 
-    def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=256, use_fake_quantization=False,
+    def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=15, use_fake_quantization=False,
                  quant_bits=8):
         super(EncodeBlock, self).__init__()
 
@@ -309,7 +345,7 @@ class TransformerEncoderBase(nn.Module):
 
         obs_dim = obs_shape[0]
 
-        # Check if communication channel is enabled 
+        # Check if communication channel is enabled
         use_comms_channel = args.use_comms_channel
         num_messages = args.num_messages
 

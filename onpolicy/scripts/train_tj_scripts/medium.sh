@@ -70,6 +70,10 @@ cmd="python /Users/yashrb/Projects/on-policy/onpolicy/scripts/train/train_traffi
     --n_rollout_threads ${n_rollout_threads} \
     --ppo_epoch ${ppo_epoch} \
     --num_mini_batch ${num_mini_batch} \
+     --use_transformer_base_actor \
+    --use_active_masks_in_transformer \
+    --n_embd 128 \
+    --use_fake_quantization \
     --n_head ${n_head} \
     --hidden_size ${hidden_size} \
     --lr ${lr} \
