@@ -300,7 +300,7 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerEncoderBase(nn.Module):
     """A TransformerEncoder base module for actor and critic."""
 
-    def __init__(self, args, obs_shape, calc_comm_metrics=True):
+    def __init__(self, args, obs_shape, calc_comm_metrics=True, hidden_size=None):
         super(TransformerEncoderBase, self).__init__()
 
         n_block = args.n_block
@@ -329,6 +329,15 @@ class TransformerEncoderBase(nn.Module):
             quant_bits=quant_bits
         )
 
+        # Add projection layer to match hidden_size if provided
+        if hidden_size is not None:
+            if n_embd == hidden_size:
+                self.projection = nn.Identity()
+            else:
+                self.projection = init_(nn.Linear(n_embd, hidden_size))
+        else:
+            self.projection = nn.Identity()
+
     def forward(self, x, active_masks=None):
         """
         Forward pass through transformer encoder.
@@ -345,6 +354,9 @@ class TransformerEncoderBase(nn.Module):
                 - (comm_loss, comm_bits): Communication metrics tuple
         """
         x, comm_metrics = self.transformer_encoder(x, active_masks)
+        
+        # Apply projection to match hidden_size
+        x = self.projection(x)
 
         # Return based on whether communication metrics calculation is enabled
         if self.calc_comm_metrics:

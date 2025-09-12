@@ -58,7 +58,7 @@ class R_Actor(nn.Module):
 
         if self.use_transformer_base_actor:
             # Actor always calculates communication metrics if communication channel is enabled
-            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True)
+            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True, hidden_size=self.hidden_size)
         else:
             base = CNNBase if len(obs_shape) == 3 else MLPBase
             self.base = base(args, obs_shape)
@@ -235,7 +235,7 @@ class R_Critic(nn.Module):
 
         if self.use_transformer_base_critic:
             # Critic never calculates communication metrics
-            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False)
+            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False, hidden_size=self.hidden_size)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
             self.base = base(args, cent_obs_shape)
