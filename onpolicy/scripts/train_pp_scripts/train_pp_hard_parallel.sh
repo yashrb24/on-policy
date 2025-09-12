@@ -44,7 +44,7 @@ COMM_COEFF="1e-2"
 # FAKEQUANT 4/8/16
 QUANT_BITS="8"
 # 10/15/20
-NUM_MESSAGES="10"
+NUM_MESSAGES="20"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
