@@ -12,7 +12,7 @@ ENV_NAME="PredatorPrey"
 SCENARIO_NAME="hard"
 ALGORITHM_NAME="rmappo"
 # "pp-hard-best-config"/ "pp-hard-ddcl-config"/ "pp-hard-fakequant-config"
-EXPERIMENT_NAME="pp-hard-fakequant-config"
+EXPERIMENT_NAME="pp-hard-delta-config"
 NUM_AGENTS=10
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -42,7 +42,9 @@ COMM_COEFF="1e-2"
 # --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
-QUANT_BITS="16"
+QUANT_BITS="8"
+# 10/15/20
+NUM_MESSAGES="10"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
@@ -169,6 +171,7 @@ run_seed_experiment() {
             --n_head "$BEST_N_HEAD" \
             --use_fake_quantization \
             --quant_bits "$QUANT_BITS" \
+            --num_messages "$NUM_MESSAGES" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
