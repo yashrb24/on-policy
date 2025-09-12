@@ -78,7 +78,7 @@ class SelfAttention(nn.Module):
             else:
                 return torch.tensor(0.0, device=z.device, dtype=z.dtype)
         else:
-            return torch.mean(torch.sum(loss.view(batch_size, -1), dim=1))
+            return torch.mean(torch.sum(loss.reshape(batch_size, -1), dim=1))
 
     def compute_num_bits_used(self, target, active_masks=None):
         """Track the number of bits used in communication."""
