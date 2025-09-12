@@ -12,7 +12,7 @@ ENV_NAME="PredatorPrey"
 SCENARIO_NAME="hard"
 ALGORITHM_NAME="rmappo"
 # "pp-hard-best-config"/ "pp-hard-ddcl-config"/ "pp-hard-fakequant-config"
-EXPERIMENT_NAME="pp-hard-best-config"
+EXPERIMENT_NAME="pp-hard-ddcl-config"
 NUM_AGENTS=10
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -38,8 +38,8 @@ BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
 COMM_COEFF="1e-4"
---use_comms_channel \
---comm_coeff "$COMM_COEFF" \
+# --use_comms_channel \
+# --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
 QUANT_BITS="8"
@@ -167,6 +167,8 @@ run_seed_experiment() {
             --n_block "$BEST_N_BLOCK" \
             --n_embd "$BEST_N_EMBD" \
             --n_head "$BEST_N_HEAD" \
+            --use_comms_channel \
+            --comm_coeff "$COMM_COEFF" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
