@@ -84,6 +84,15 @@ def parse_args(args, parser):
 
     all_args = parser.parse_known_args(args)[0]
 
+    # Ensure n_embd and hidden_size are equal
+    if hasattr(all_args, 'n_embd') and hasattr(all_args, 'hidden_size'):
+        if all_args.n_embd != all_args.hidden_size:
+            print(f"!!!!!!!!! WARNING !!!!!!!!!")
+            print(f"n_embd ({all_args.n_embd}) and hidden_size ({all_args.hidden_size}) are different!")
+            print(f"Setting both to n_embd value ({all_args.n_embd}) for consistency.")
+            print(f"!!!!!!!!! WARNING !!!!!!!!!")
+            all_args.hidden_size = all_args.n_embd
+
     return all_args
 
 
