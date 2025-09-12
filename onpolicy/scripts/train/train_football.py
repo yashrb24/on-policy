@@ -112,6 +112,16 @@ def main(args):
     else:
         raise NotImplementedError
 
+    # Print all arguments
+    print("=" * 80)
+    print("TRAINING CONFIGURATION ARGUMENTS")
+    print("=" * 80)
+    args_dict = vars(all_args)
+    for key in sorted(args_dict.keys()):
+        value = args_dict[key]
+        print(f"{key:<40}: {value}")
+    print("=" * 80)
+
     # cuda
     if all_args.cuda and torch.cuda.is_available():
         print("choose to use gpu...")
