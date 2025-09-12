@@ -167,7 +167,6 @@ run_seed_experiment() {
             --comm_coeff "$COMM_COEFF" \
             # --use_fake_quantization \
             # --quant_bits "$QUANT_BITS" \
-            --use_wandb True \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
