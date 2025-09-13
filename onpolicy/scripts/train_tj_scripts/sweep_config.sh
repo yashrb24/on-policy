@@ -25,7 +25,7 @@ AVAILABLE_GPUS=(0 1 2 3)  # List available GPU IDs
 ENV_NAME="TrafficJunction"
 SCENARIO_NAME="medium"
 ALGORITHM_NAME="rmappo"
-EXPERIMENT_PREFIX="tj-exploratory-runs"
+EXPERIMENT_PREFIX="tj-parallel-sweep"
 NUM_AGENTS=5
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -37,8 +37,8 @@ LOG_INTERVAL=200
 
 # Wandb configuration
 USE_WANDB=true
-WANDB_USER="yashrb"
-WANDB_PROJECT="on-policy"
+WANDB_USER="aditya_"
+WANDB_PROJECT="TrafficJunction"
 
 # =============================================================================
 # HYPERPARAMETER SEARCH SPACE
