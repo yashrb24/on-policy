@@ -23,9 +23,9 @@ AVAILABLE_GPUS=(0 1 2 3)  # List available GPU IDs
 # =============================================================================
 
 ENV_NAME="TrafficJunction"
-SCENARIO_NAME="medium"
+SCENARIO_NAME="hard"
 ALGORITHM_NAME="rmappo"
-EXPERIMENT_PREFIX="tj-parallel-sweep"
+EXPERIMENT_PREFIX="tj-hard-parallel-sweep"
 NUM_AGENTS=5
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
