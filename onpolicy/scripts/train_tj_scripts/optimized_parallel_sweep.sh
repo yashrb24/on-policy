@@ -211,6 +211,7 @@ EOF
             --save_interval "$SAVE_INTERVAL" \
             --log_interval "$LOG_INTERVAL" \
             --use_transformer_base_actor \
+            --use_active_masks_in_transformer \
             --hidden_size "$n_embd" \
             --lr "$lr" \
             --critic_lr "$critic_lr" \
