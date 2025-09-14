@@ -39,7 +39,7 @@ BEST_N_HEAD="4"
 BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
-# COMM_COEFF="1e-4"
+COMM_COEFF="1e-4"
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
 
@@ -111,7 +111,8 @@ echo ""
 # Function to get GPU for a job
 get_gpu_for_job() {
     local job_index=$1
-    local gpu_index=$((job_index % NUM_GPUS))
+    # local gpu_index=$((job_index % NUM_GPUS))
+    local gpu_index=2
     echo "${AVAILABLE_GPUS[$gpu_index]}"
 }
 
@@ -169,6 +170,8 @@ run_seed_experiment() {
             --n_block "$BEST_N_BLOCK" \
             --n_embd "$BEST_N_EMBD" \
             --n_head "$BEST_N_HEAD" \
+            --use_comms_channel \
+            --comm_coeff "$COMM_COEFF" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
