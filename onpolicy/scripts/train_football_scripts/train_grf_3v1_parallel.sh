@@ -13,9 +13,9 @@ SCENARIO_NAME="academy_3_vs_1_with_keeper"
 ALGORITHM_NAME="rmappo"
 # "grf-3v1-best-config"/ "grf-3v1-ddcl-config"/ "grf-3v1-fakequant-config"
 EXPERIMENT_NAME="grf-3v1-fakequant-config"
-NUM_AGENTS=5
-NUM_ENV_STEPS=3000000
-EPISODE_LENGTH=40
+NUM_AGENTS=3
+NUM_ENV_STEPS=15000000
+EPISODE_LENGTH=200
 DIM=10
 VISION=1
 N_ROLLOUT_THREADS=15
