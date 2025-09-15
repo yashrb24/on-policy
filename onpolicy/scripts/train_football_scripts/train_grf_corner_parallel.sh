@@ -26,7 +26,7 @@ LOG_INTERVAL=400
 # WANDB_USER="yashrb"
 # WANDB_PROJECT="on-policy"
 WANDB_USER="yashrb"
-WANDB_PROJECT="Football"
+WANDB_PROJECT="football-sweeps"
 
 # Best hyperparameters
 BEST_LR="3e-4"
