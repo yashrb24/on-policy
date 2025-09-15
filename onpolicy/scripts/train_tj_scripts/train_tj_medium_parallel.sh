@@ -112,7 +112,7 @@ echo ""
 get_gpu_for_job() {
     local job_index=$1
     # local gpu_index=$((job_index % NUM_GPUS))
-    local gpu_index=3
+    local gpu_index=0
     echo "${AVAILABLE_GPUS[$gpu_index]}"
 }
 
