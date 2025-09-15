@@ -11,8 +11,8 @@
 ENV_NAME="PredatorPrey"
 SCENARIO_NAME="hard"
 ALGORITHM_NAME="rmappo"
-# "pp-hard-best-config"/ "pp-hard-ddcl-config"/ "pp-hard-fakequant-config"
-EXPERIMENT_NAME="pp-hard-ddcl-config"
+# "pp-hard-best-config"/ "pp-hard-ddcl-config"/ "pp-hard-fakequant-config"/ "pp-hard-delta-config"
+EXPERIMENT_NAME="pp-hard-delta-config"
 NUM_AGENTS=10
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -37,9 +37,9 @@ BEST_N_HEAD="4"
 BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
-COMM_COEFF="1e-3"
+COMM_COEFF="1e-4"
 # 10/15/20
-NUM_MESSAGES="15"
+NUM_MESSAGES="10"
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
 # --num_messages "$NUM_MESSAGES" \
