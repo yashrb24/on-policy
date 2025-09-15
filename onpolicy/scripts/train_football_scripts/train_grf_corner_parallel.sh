@@ -146,7 +146,7 @@ run_seed_experiment() {
         echo "[$start_time] Starting experiment for seed $seed on GPU $gpu_id" | tee -a "$log_file"
         
         # Run the experiment
-        CUDA_VISIBLE_DEVICES=$gpu_id python ../train/train_traffic_junction.py \
+        CUDA_VISIBLE_DEVICES=$gpu_id python ../train/train_football.py \
             --env_name "$ENV_NAME" \
             --scenario_name "$SCENARIO_NAME" \
             --algorithm_name "$ALGORITHM_NAME" \
