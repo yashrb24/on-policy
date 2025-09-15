@@ -39,7 +39,7 @@ BEST_HIDDEN_SIZE="64"  # Must match n_embd
 # DDCL 1e-4/ 1e-3/ 1e-2
 COMM_COEFF="1e-4"
 # 10/15/20
-NUM_MESSAGES="10"
+NUM_MESSAGES="20"
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
 # --num_messages "$NUM_MESSAGES" \
