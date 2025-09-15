@@ -25,7 +25,7 @@ SAVE_INTERVAL=200
 LOG_INTERVAL=400
 # WANDB_USER="yashrb"
 # WANDB_PROJECT="on-policy"
-WANDB_USER="aditya_"
+WANDB_USER="yashrb"
 WANDB_PROJECT="Football"
 
 # Best hyperparameters
