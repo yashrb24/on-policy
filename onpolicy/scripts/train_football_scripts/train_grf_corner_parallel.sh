@@ -12,7 +12,7 @@ ENV_NAME="Football"
 SCENARIO_NAME="academy_corner"
 ALGORITHM_NAME="rmappo"
 # "grf-corner-best-config"/ "grf-corner-ddcl-config"/ "grf-corner-fakequant-config"
-EXPERIMENT_NAME="grf-corner-ddcl-config"
+EXPERIMENT_NAME="grf-corner-fakequant-config"
 NUM_AGENTS=5
 NUM_ENV_STEPS=3000000
 EPISODE_LENGTH=40
@@ -39,14 +39,14 @@ BEST_N_HEAD="4"
 BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
-COMM_COEFF="1e-4"
-NUM_MESSAGES=15
+# COMM_COEFF="1e-4"
+# NUM_MESSAGES=15
 # --num_messages "$NUM_MESSAGES" \
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
-# QUANT_BITS="16"
+QUANT_BITS="8"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
@@ -171,9 +171,8 @@ run_seed_experiment() {
             --n_block "$BEST_N_BLOCK" \
             --n_embd "$BEST_N_EMBD" \
             --n_head "$BEST_N_HEAD" \
-            --num_messages "$NUM_MESSAGES" \
-            --use_comms_channel \
-            --comm_coeff "$COMM_COEFF" \
+            --use_fake_quantization \
+            --quant_bits "$QUANT_BITS" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
