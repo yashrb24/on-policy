@@ -46,7 +46,7 @@ BEST_HIDDEN_SIZE="64"  # Must match n_embd
 # --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
-QUANT_BITS="4"
+QUANT_BITS="16"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
