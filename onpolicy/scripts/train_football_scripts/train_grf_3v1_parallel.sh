@@ -11,8 +11,8 @@
 ENV_NAME="Football"
 SCENARIO_NAME="academy_3_vs_1_with_keeper"
 ALGORITHM_NAME="rmappo"
-# "grf-3v1-best-config"/ "grf-3v1-ddcl-config"/ "grf-3v1-fakequant-config"
-EXPERIMENT_NAME="grf-3v1-fakequant-config"
+# "grf-3v1-best-config"/ "grf-3v1-ddcl-config"/ "grf-3v1-fakequant-config"/ "grf-3v1-delta-config"
+EXPERIMENT_NAME="grf-3v1-delta-config"
 NUM_AGENTS=3
 NUM_ENV_STEPS=15000000
 EPISODE_LENGTH=200
@@ -39,14 +39,14 @@ BEST_N_HEAD="4"
 BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
-# COMM_COEFF="1e-4"
-# NUM_MESSAGES=15
+COMM_COEFF="1e-4"
+NUM_MESSAGES=15
 # --num_messages "$NUM_MESSAGES" \
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
 
 # FAKEQUANT 4/8/16
-QUANT_BITS="16"
+# QUANT_BITS="16"
 # --use_fake_quantization \
 # --quant_bits "$QUANT_BITS" \
 
@@ -171,8 +171,9 @@ run_seed_experiment() {
             --n_block "$BEST_N_BLOCK" \
             --n_embd "$BEST_N_EMBD" \
             --n_head "$BEST_N_HEAD" \
-            --use_fake_quantization \
-            --quant_bits "$QUANT_BITS" \
+            --num_messages "$NUM_MESSAGES" \
+            --use_comms_channel \
+            --comm_coeff "$COMM_COEFF" \
             --user_name "$WANDB_USER" \
             --wandb_name "$WANDB_PROJECT" \
             2>&1 | tee -a "$log_file"
