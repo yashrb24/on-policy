@@ -39,8 +39,8 @@ BEST_N_HEAD="4"
 BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
 # DDCL 1e-4/ 1e-3/ 1e-2
-COMM_COEFF="1e-4"
-NUM_MESSAGES=20
+COMM_COEFF="5e-4"
+NUM_MESSAGES=15
 # --num_messages "$NUM_MESSAGES" \
 # --use_comms_channel \
 # --comm_coeff "$COMM_COEFF" \
