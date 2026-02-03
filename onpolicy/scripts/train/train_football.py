@@ -163,7 +163,7 @@ def main(args):
             # Standalone run - initialize wandb normally
             print("Initializing new WandB run")
             run = wandb.init(config=all_args,
-                            project=all_args.env_name,
+                            project=all_args.wandb_name if all_args.wandb_name else all_args.env_name,
                             entity=all_args.user_name,
                             notes=socket.gethostname(),
                             name="-".join([
