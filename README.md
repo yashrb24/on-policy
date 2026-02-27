@@ -1,1 +1,2 @@
-dev repo for MARL comms experiments in the paper - https://github.com/yashrb24/on-policy.git
+dev repo for MARL comms experiments in the paper - [LEARNING WHAT TO SAY AND HOW PRECISELY: EFFICIENT COMMUNICATION VIA DIFFERENTIABLE DISCRETE COMMUNICATION LEARNING](https://arxiv.org/pdf/2511.01554)
+
