@@ -28,6 +28,7 @@ class SelfAttention(nn.Module):
         # Communication channel parameters (backward compatible)
         self.use_comms_channel = use_comms_channel
         self.num_messages = num_messages
+        self.delta = 1 / num_messages
 
         # Quantization parameters
         self.use_fake_quantization = use_fake_quantization
@@ -202,8 +203,16 @@ class SelfAttention(nn.Module):
         # Apply communication channel noise if enabled
         if self.use_comms_channel:
             # Add noise to keys
+
+            # Old Variation
             k_noise = self.get_comms_noise(k)
             k = k + k_noise
+
+            # New variation
+            # k_noise_1 = self.get_comms_noise(k)
+            # k_noise_2 = self.get_comms_noise(k)
+            # k_noise = k_noise_1 + k_noise_2
+            # k = (self.delta * (torch.floor((k + k_noise) / self.delta) + 0.5) - k).detach() + k
 
             # Track communication metrics for keys
             self.comm_loss += self.compute_component_log_loss(k, active_masks)
@@ -244,8 +253,14 @@ class SelfAttention(nn.Module):
 
         # Apply communication channel noise to output if enabled
         if self.use_comms_channel:
+            # Old variation 
             y_noise = self.get_comms_noise(y)
             y = y + y_noise
+
+            # y_noise_1 = self.get_comms_noise(y)
+            # y_noise_2 = self.get_comms_noise(y)
+            # y_noise = y_noise_1 + y_noise_2
+            # y = (self.delta * (torch.floor((y + y_noise) / self.delta) + 0.5) - y).detach() + y
 
             # Track communication metrics for output
             self.comm_loss += self.compute_component_log_loss(y, active_masks)

@@ -169,7 +169,6 @@ def main(args):
                             name="-".join([
                                 all_args.algorithm_name,
                                 all_args.experiment_name,
-                                "seed" + str(all_args.seed)
                             ]),
                             group=all_args.scenario_name,
                             dir=str(run_dir),
