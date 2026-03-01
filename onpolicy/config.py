@@ -188,6 +188,8 @@ def get_config():
                         help="[for wandb usage], by default True, will log date to wandb server. or else will use tensorboard to log data.")
     parser.add_argument("--wandb_name", type=str, default=None,
                         help="[for wandb usage], to specify the wandb project name. Defaults to env_name if not specified.")
+    parser.add_argument("--wandb_tags", type=str, nargs='+', default=["comms"],
+                        help="[for wandb usage], tags for the wandb run.")
 
     # env parameters
     parser.add_argument("--env_name", type=str, default='StarCraft2', help="specify the name of environment")

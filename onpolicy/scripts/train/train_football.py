@@ -158,6 +158,7 @@ def main(args):
             print(f"Detected WandB sweep run: {wandb.run.id}")
             # Update the config with all_args
             wandb.config.update(vars(all_args), allow_val_change=True)
+            wandb.run.tags = all_args.wandb_tags
             run = wandb.run
         else:
             # Standalone run - initialize wandb normally
@@ -173,6 +174,7 @@ def main(args):
                             group=all_args.scenario_name,
                             dir=str(run_dir),
                             job_type="training",
+                            tags=all_args.wandb_tags,
                             reinit=True)
     else:
         if not run_dir.exists():
