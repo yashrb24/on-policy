@@ -4,6 +4,7 @@
 
 program: sweep_wrapper.py
 method: grid
+project: ddcl-applications
 metric:
   name: win_rate
   goal: maximize
