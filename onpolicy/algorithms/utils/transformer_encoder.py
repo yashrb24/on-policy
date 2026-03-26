@@ -17,7 +17,7 @@ def init_(m, gain=0.01, activate=False):
 class SelfAttention(nn.Module):
 
     def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=15,
-                 use_fake_quantization=False, quant_bits=8):
+                 use_fake_quantization=False, quant_bits=8, ddcl_variation="new"):
         super(SelfAttention, self).__init__()
 
         assert n_embd % n_head == 0
@@ -29,6 +29,7 @@ class SelfAttention(nn.Module):
         self.use_comms_channel = use_comms_channel
         self.num_messages = num_messages
         self.delta = 1 / num_messages
+        self.ddcl_variation = ddcl_variation
 
         # Quantization parameters
         self.use_fake_quantization = use_fake_quantization
@@ -203,16 +204,14 @@ class SelfAttention(nn.Module):
         # Apply communication channel noise if enabled
         if self.use_comms_channel:
             # Add noise to keys
-
-            # Old Variation
-            k_noise = self.get_comms_noise(k)
-            k = k + k_noise
-
-            # New variation
-            # k_noise_1 = self.get_comms_noise(k)
-            # k_noise_2 = self.get_comms_noise(k)
-            # k_noise = k_noise_1 + k_noise_2
-            # k = (self.delta * (torch.floor((k + k_noise) / self.delta) + 0.5) - k).detach() + k
+            if self.ddcl_variation == "old":
+                k_noise = self.get_comms_noise(k)
+                k = k + k_noise
+            else:
+                k_noise_1 = self.get_comms_noise(k)
+                k_noise_2 = self.get_comms_noise(k)
+                k_noise = k_noise_1 + k_noise_2
+                k = (self.delta * (torch.floor((k + k_noise) / self.delta) + 0.5) - k).detach() + k
 
             # Track communication metrics for keys
             self.comm_loss += self.compute_component_log_loss(k, active_masks)
@@ -253,14 +252,14 @@ class SelfAttention(nn.Module):
 
         # Apply communication channel noise to output if enabled
         if self.use_comms_channel:
-            # Old variation 
-            y_noise = self.get_comms_noise(y)
-            y = y + y_noise
-
-            # y_noise_1 = self.get_comms_noise(y)
-            # y_noise_2 = self.get_comms_noise(y)
-            # y_noise = y_noise_1 + y_noise_2
-            # y = (self.delta * (torch.floor((y + y_noise) / self.delta) + 0.5) - y).detach() + y
+            if self.ddcl_variation == "old":
+                y_noise = self.get_comms_noise(y)
+                y = y + y_noise
+            else:
+                y_noise_1 = self.get_comms_noise(y)
+                y_noise_2 = self.get_comms_noise(y)
+                y_noise = y_noise_1 + y_noise_2
+                y = (self.delta * (torch.floor((y + y_noise) / self.delta) + 0.5) - y).detach() + y
 
             # Track communication metrics for output
             self.comm_loss += self.compute_component_log_loss(y, active_masks)
@@ -282,7 +281,7 @@ class EncodeBlock(nn.Module):
     """ an unassuming Transformer block """
 
     def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=15, use_fake_quantization=False,
-                 quant_bits=8):
+                 quant_bits=8, ddcl_variation="new"):
         super(EncodeBlock, self).__init__()
 
         self.ln1 = nn.LayerNorm(n_embd)
@@ -291,7 +290,8 @@ class EncodeBlock(nn.Module):
                                   use_comms_channel=use_comms_channel,
                                   num_messages=num_messages,
                                   use_fake_quantization=use_fake_quantization,
-                                  quant_bits=quant_bits)
+                                  quant_bits=quant_bits,
+                                  ddcl_variation=ddcl_variation)
         self.mlp = nn.Sequential(
             init_(nn.Linear(n_embd, 1 * n_embd), activate=True),
             nn.GELU(),
@@ -311,7 +311,7 @@ class EncodeBlock(nn.Module):
 class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, obs_shape, n_block, n_embd, n_head, use_comms_channel=False, num_messages=15,
-                 use_fake_quantization=False, quant_bits=8):
+                 use_fake_quantization=False, quant_bits=8, ddcl_variation="new"):
         super(TransformerEncoderLayer, self).__init__()
 
         self.obs_dim = obs_shape
@@ -326,7 +326,8 @@ class TransformerEncoderLayer(nn.Module):
                                                  use_comms_channel=use_comms_channel,
                                                  num_messages=num_messages,
                                                  use_fake_quantization=use_fake_quantization,
-                                                 quant_bits=quant_bits)
+                                                 quant_bits=quant_bits,
+                                                 ddcl_variation=ddcl_variation)
                                      for _ in range(n_block)])
 
     def forward(self, obs, active_masks=None):
@@ -368,6 +369,10 @@ class TransformerEncoderBase(nn.Module):
         use_fake_quantization = args.use_fake_quantization
         quant_bits = args.quant_bits
 
+        # DDCL variation
+        ddcl_variation = args.ddcl_variation
+        assert ddcl_variation in ["new", "old"]
+
         # Store flag for communication metrics calculation
         self.calc_comm_metrics = calc_comm_metrics and use_comms_channel
 
@@ -377,7 +382,8 @@ class TransformerEncoderBase(nn.Module):
             use_comms_channel=use_comms_channel,
             num_messages=num_messages,
             use_fake_quantization=use_fake_quantization,
-            quant_bits=quant_bits
+            quant_bits=quant_bits,
+            ddcl_variation=ddcl_variation
         )
 
     def forward(self, x, active_masks=None):

@@ -345,6 +345,8 @@ def get_config():
                         help="Number of messages for communication channel quantization (default: 15)")
     parser.add_argument("--comm_coeff", type=float, default=0.0001,
                         help="Coefficient for communication channel loss (default: 0.001)")
+    parser.add_argument("--ddcl_variation", type=str, default="new", choices=["old", "new"],
+                        help="DDCL variation to use: 'old' (single noise) or 'new' (double noise + quantization)")
     parser.add_argument("--use_fake_quantization", action='store_true', default=False,
                         help="Whether to use fake quantization for communication channel")
     parser.add_argument("--quant_bits", type=int, default=8, help="Quantization bits for communication channel")
