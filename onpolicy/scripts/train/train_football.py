@@ -194,7 +194,7 @@ def main(args):
         all_args.scenario_name, 
         all_args.algorithm_name, 
         all_args.experiment_name
-    ]) + "@" + all_args.user_name)
+    ]))
     
     # seed
     torch.manual_seed(all_args.seed)
