@@ -1,5 +1,5 @@
 # WandB Sweep Configuration for Football Corner DDCL Experiments
-# Grid sweep over seeds, comm_coeff (lambda), and num_messages (delta)
+# Grid sweep over seeds, comm_coeff (lambda), and num_messages (delta) and variation
 # All other hyperparameters fixed to best values from train_football_corner.sh
 
 program: sweep_wrapper.py
@@ -20,9 +20,9 @@ parameters:
   num_agents:
     value: 3
   num_env_steps:
-    value: 50000000
+    value: 25000000
   episode_length:
-    value: 1000
+    value: 200
   representation:
     value: simple115v2
   rewards:
@@ -75,3 +75,5 @@ parameters:
     values: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
   num_messages:
     values: [10, 15, 20, 25, 30]
+  ddcl_variation:
+    values: ["old", "new"]

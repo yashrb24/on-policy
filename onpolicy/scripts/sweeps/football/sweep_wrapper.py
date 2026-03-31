@@ -72,6 +72,8 @@ def run_training():
         args_list.extend(['--comm_coeff', str(config.comm_coeff)])
     if hasattr(config, 'num_messages'):
         args_list.extend(['--num_messages', str(config.num_messages)])
+    if hasattr(config, 'ddcl_variation'):
+        args_list.extend(['--ddcl_variation', str(config.ddcl_variation)])
     
     # Set CUDA device if needed
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -81,7 +83,7 @@ def run_training():
     print(f"  entropy_coef={config.entropy_coef}, clip_param={config.clip_param}")
     print(f"  n_block={config.n_block}, n_embd={config.n_embd}, n_head={config.n_head}")
     if getattr(config, 'use_comms_channel', False):
-        print(f"  DDCL: comm_coeff={config.comm_coeff}, num_messages={config.num_messages}")
+        print(f"  DDCL: comm_coeff={config.comm_coeff}, num_messages={config.num_messages}, variation={getattr(config, 'ddcl_variation', 'new')}")
     
     # Call the main function directly
     try:
