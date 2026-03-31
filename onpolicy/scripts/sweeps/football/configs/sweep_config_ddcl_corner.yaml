@@ -1,0 +1,77 @@
+# WandB Sweep Configuration for Football Corner DDCL Experiments
+# Grid sweep over seeds, comm_coeff (lambda), and num_messages (delta)
+# All other hyperparameters fixed to best values from train_football_corner.sh
+
+program: sweep_wrapper.py
+method: grid
+project: ddcl-applications
+metric:
+  name: win_rate
+  goal: maximize
+
+parameters:
+  # Environment and base configuration (fixed)
+  env_name:
+    value: Football
+  scenario_name:
+    value: academy_corner
+  algorithm_name:
+    value: rmappo
+  num_agents:
+    value: 3
+  num_env_steps:
+    value: 50000000
+  episode_length:
+    value: 1000
+  representation:
+    value: simple115v2
+  rewards:
+    value: scoring
+  n_rollout_threads:
+    value: 50
+  save_interval:
+    value: 100000
+  log_interval:
+    value: 3000
+  use_transformer_base_actor:
+    value: true
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: ddcl-applications
+
+  # Best hyperparameters (fixed)
+  lr:
+    value: 0.0005
+  critic_lr:
+    value: 0.0005
+  entropy_coef:
+    value: 0.01
+  clip_param:
+    value: 0.2
+  n_block:
+    value: 1
+  n_embd:
+    value: 64
+  n_head:
+    value: 4
+  hidden_size:
+    value: 64
+  max_grad_norm:
+    value: 10.0
+  ppo_epoch:
+    value: 15
+  num_mini_batch:
+    value: 2
+
+  # DDCL configuration (always enabled)
+  use_comms_channel:
+    value: true
+
+  # Swept parameters
+  seed:
+    values: [8, 12, 18, 35, 41]
+  comm_coeff:
+    values: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
+  num_messages:
+    values: [10, 15, 20, 25, 30]
