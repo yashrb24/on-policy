@@ -6,14 +6,14 @@
 
 # Base configuration
 ENV_NAME="PredatorPrey"
-SCENARIO_NAME="medium"
+SCENARIO_NAME="hard"
 ALGORITHM_NAME="rmappo"
-# "pp-medium-best-config"/ "pp-medium-ddcl-config"/ "pp-medium-fakequant-config"/ "pp-medium-delta-config"
-EXPERIMENT_NAME="pp-medium-best-config"
-NUM_AGENTS=5
+# "pp-hard-best-config"/ "pp-hard-ddcl-config"/ "pp-hard-fakequant-config"/ "pp-hard-delta-config"
+EXPERIMENT_NAME="pp-hard-best-config"
+NUM_AGENTS=10
 NUM_ENV_STEPS=3000000
-EPISODE_LENGTH=40
-DIM=10
+EPISODE_LENGTH=80
+DIM=20
 VISION=1
 N_ROLLOUT_THREADS=15
 PPO_EPOCH=10
