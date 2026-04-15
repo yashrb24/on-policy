@@ -1,91 +1,119 @@
 #!/bin/bash
 
-# EXPERIMENT CONFIGURATION
-exp="tj-exploratory-runs"
-seed=1
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-# ENVIRONMENT CONFIGURATION
-env="TrafficJunction"
-difficulty="medium"
-num_agents=10
-dim=14
-vision=1
+# Base configuration
+ENV_NAME="TrafficJunction"
+DIFFICULTY="medium"
+ALGORITHM_NAME="rmappo"
+# "tj-medium-best-config"/ "tj-medium-ddcl-config"/ "tj-medium-fakequant-config"/ "tj-medium-delta-config"
+EXPERIMENT_NAME="tj-medium-fakequant-config"
+NUM_AGENTS=10
+NUM_ENV_STEPS=120000
+EPISODE_LENGTH=40
+DIM=14
+VISION=0
+ADD_RATE_MIN=0.05
+ADD_RATE_MAX=0.02
+CURR_START=250
+CURR_END=1250
+N_ROLLOUT_THREADS=1
+PPO_EPOCH=10
+NUM_MINI_BATCH=1
+SAVE_INTERVAL=200
+LOG_INTERVAL=400
+WANDB_USER="yashrb"
+WANDB_PROJECT="on-policy"
 
-# Curriculum settings
-add_rate_min=1.0
-add_rate_max=1.0
-curr_start=1
-curr_end=1
+# Best hyperparameters
+BEST_LR="1e-3"
+BEST_N_BLOCK="2"
+BEST_N_EMBD="64"
+BEST_N_HEAD="4"
+BEST_HIDDEN_SIZE="64"  # Must match n_embd
 
-# TRAINING CONFIGURATION
-algo="rmappo"
-num_env_steps=120000
-episode_length=80
-n_rollout_threads=1
+# DDCL Configuration
+COMM_COEFF="1e-4"  # Options: 1e-4/ 1e-3/ 1e-2
+NUM_MESSAGES="15"  # Options: 10/15/20
+# Uncomment these lines to enable DDCL:
+# --use_comms_channel \
+# --comm_coeff "$COMM_COEFF" \
+# --num_messages "$NUM_MESSAGES" \
 
-# PPO hyperparameters
-ppo_epoch=10
-num_mini_batch=1
-lr=1e-3
+# Fake Quantization Configuration
+# QUANT_BITS="8"  # Options: 4/8/16
+# --use_fake_quantization is active below; comment it out to disable
 
-# NETWORK ARCHITECTURE
-hidden_size=128
-n_head=4
+# Seed to run
+SEED=1
+# =============================================================================
+# DIRECTORY SETUP
+# =============================================================================
 
-# LOGGING & CHECKPOINTING
-save_interval=200
-log_interval=400
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_DIR="run_${TIMESTAMP}"
+mkdir -p "${RUN_DIR}/logs"
 
-# WandB configuration - set use_wandb to True to enable
-use_wandb=False  # Change to True to enable WandB
-user_name="yashrb"
-wandb_name="on-policy"
+echo "=== Single Seed Execution Setup ==="
+echo "Created run directory: $RUN_DIR"
+echo "Seed: $SEED"
+echo "===================================="
+echo ""
 
-# ============================================================================
-# HARDWARE CONFIGURATION
-# ============================================================================
-CUDA_VISIBLE_DEVICES=0
+# =============================================================================
+# EXPERIMENT EXECUTION
+# =============================================================================
 
-# ============================================================================
-# RUN TRAINING
-# ============================================================================
-# Build the command
-cmd="python /Users/yashrb/Projects/on-policy/onpolicy/scripts/train/train_traffic_junction.py \
-    --env_name ${env} \
-    --algorithm_name ${algo} \
-    --experiment_name ${exp} \
-    --seed ${seed} \
-    --num_agents ${num_agents} \
-    --num_env_steps ${num_env_steps} \
-    --episode_length ${episode_length} \
-    --save_interval ${save_interval} \
-    --log_interval ${log_interval} \
-    --dim ${dim} \
-    --vision ${vision} \
-    --add_rate_min ${add_rate_min} \
-    --add_rate_max ${add_rate_max} \
-    --curr_start ${curr_start} \
-    --curr_end ${curr_end} \
-    --difficulty ${difficulty} \
-    --n_rollout_threads ${n_rollout_threads} \
-    --ppo_epoch ${ppo_epoch} \
-    --num_mini_batch ${num_mini_batch} \
-     --use_transformer_base_actor \
-    --use_active_masks_in_transformer \
-    --n_embd 128 \
+EXP_NAME="${EXPERIMENT_NAME}"
+EXP_NAME_WITH_SEED="${EXPERIMENT_NAME}_seed${SEED}"
+LOG_FILE="${RUN_DIR}/logs/${EXP_NAME_WITH_SEED}.log"
+
+echo "=== Starting Experiment ==="
+echo "Experiment name: $EXP_NAME_WITH_SEED"
+echo "Seed: $SEED"
+echo "Log file: $LOG_FILE"
+echo "WandB project: $WANDB_PROJECT"
+echo ""
+
+# Run the experiment
+python ../train/train_traffic_junction.py \
+    --env_name "$ENV_NAME" \
+    --difficulty "$DIFFICULTY" \
+    --algorithm_name "$ALGORITHM_NAME" \
+    --experiment_name "$EXP_NAME" \
+    --seed "$SEED" \
+    --num_agents "$NUM_AGENTS" \
+    --num_env_steps "$NUM_ENV_STEPS" \
+    --episode_length "$EPISODE_LENGTH" \
+    --dim "$DIM" \
+    --vision "$VISION" \
+    --add_rate_min "$ADD_RATE_MIN" \
+    --add_rate_max "$ADD_RATE_MAX" \
+    --curr_start "$CURR_START" \
+    --curr_end "$CURR_END" \
+    --n_rollout_threads "$N_ROLLOUT_THREADS" \
+    --ppo_epoch "$PPO_EPOCH" \
+    --num_mini_batch "$NUM_MINI_BATCH" \
+    --save_interval "$SAVE_INTERVAL" \
+    --log_interval "$LOG_INTERVAL" \
+    --use_transformer_base_actor \
     --use_fake_quantization \
-    --n_head ${n_head} \
-    --hidden_size ${hidden_size} \
-    --lr ${lr} \
-    --use_wandb ${use_wandb}"
+    --hidden_size "$BEST_HIDDEN_SIZE" \
+    --n_block "$BEST_N_BLOCK" \
+    --n_embd "$BEST_N_EMBD" \
+    --n_head "$BEST_N_HEAD" \
+    --lr "$BEST_LR" \
+    --user_name "$WANDB_USER" \
+    --wandb_name "$WANDB_PROJECT" \
+    2>&1 | tee "$LOG_FILE"
 
-# Add WandB parameters if enabled
-if [ "${use_wandb}" = "True" ]; then
-    cmd="${cmd} --user_name ${user_name} --wandb_name ${wandb_name}"
-fi
+# =============================================================================
+# EXPERIMENT COMPLETE
+# =============================================================================
 
-# Echo the command
-echo ${cmd}
-
-# Execute the command
-eval ${cmd}
+echo ""
+echo "=== Experiment Complete ==="
+echo "Results saved in: $RUN_DIR/"
+echo "============================"

@@ -9,13 +9,13 @@ env="TrafficJunction"
 difficulty="hard"
 num_agents=20
 dim=18
-vision=1
+vision=0
 
-# Curriculum settings
-add_rate_min=0.05
+# Curriculum settings (IC3Net TJ hard config)
+add_rate_min=0.02
 add_rate_max=0.05
-curr_start=1
-curr_end=1
+curr_start=250
+curr_end=1250
 
 # TRAINING CONFIGURATION
 algo="rmappo"
@@ -29,7 +29,9 @@ num_mini_batch=1
 lr=1e-3
 
 # NETWORK ARCHITECTURE
-hidden_size=128
+hidden_size=64
+n_embd=64
+n_block=2
 n_head=4
 
 # LOGGING & CHECKPOINTING
@@ -71,8 +73,8 @@ cmd="python /Users/yashrb/Projects/on-policy/onpolicy/scripts/train/train_traffi
     --ppo_epoch ${ppo_epoch} \
     --num_mini_batch ${num_mini_batch} \
      --use_transformer_base_actor \
-    --use_active_masks_in_transformer \
-    --n_embd 128 \
+    --n_block ${n_block} \
+    --n_embd ${n_embd} \
     --use_fake_quantization \
     --n_head ${n_head} \
     --hidden_size ${hidden_size} \

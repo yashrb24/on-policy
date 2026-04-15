@@ -1,0 +1,88 @@
+# WandB Sweep Configuration for TrafficJunction Hard DDCL Experiments
+# Grid sweep over seeds, comm_coeff (lambda), num_messages (delta) and variation
+# All other hyperparameters fixed to IC3Net-aligned values from train_tj_scripts/hard.sh
+
+program: sweep_wrapper.py
+name: ddcl sweep tj
+method: grid
+project: ddcl-applications
+metric:
+  name: win_rate
+  goal: maximize
+
+parameters:
+  # Environment and base configuration (fixed, IC3Net TJ hard)
+  env_name:
+    value: TrafficJunction
+  difficulty:
+    value: hard
+  algorithm_name:
+    value: rmappo
+  num_agents:
+    value: 20
+  num_env_steps:
+    value: 320000
+  episode_length:
+    value: 80
+  dim:
+    value: 18
+  vision:
+    value: 0
+  add_rate_min:
+    value: 0.02
+  add_rate_max:
+    value: 0.05
+  curr_start:
+    value: 250
+  curr_end:
+    value: 1250
+  n_rollout_threads:
+    value: 1
+  save_interval:
+    value: 200
+  log_interval:
+    value: 400
+  use_transformer_base_actor:
+    value: true
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: ddcl-applications
+
+  # Best hyperparameters (fixed)
+  lr:
+    value: 0.001
+  critic_lr:
+    value: 0.001
+  entropy_coef:
+    value: 0.001
+  clip_param:
+    value: 0.2
+  n_block:
+    value: 2
+  n_embd:
+    value: 64
+  n_head:
+    value: 4
+  hidden_size:
+    value: 64
+  max_grad_norm:
+    value: 10.0
+  ppo_epoch:
+    value: 10
+  num_mini_batch:
+    value: 1
+
+  # DDCL configuration (always enabled)
+  use_comms_channel:
+    value: true
+
+  # Swept parameters
+  seed:
+    values: [8, 12, 18, 35, 41]
+  comm_coeff:
+    values: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
+  num_messages:
+    values: [10, 15, 20, 25, 30]
+  ddcl_variation:
+    values: ["old", "new"]
