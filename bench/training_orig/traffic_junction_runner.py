@@ -84,22 +84,13 @@ class TrafficJunctionRunner(Runner):
         # replay buffer
         if self.use_centralized_V:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
-            # === ORIGINAL (kept for reference, commented out) ===
-            # share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
-            # Broadcast-view avoids materializing a num_agents-wide copy; buffer
-            # slice-assignment still writes a contiguous copy into the slot.
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
+            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
 
         # insert obs to buffer
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.buffer.share_obs[0] = share_obs.copy()
-        # self.buffer.obs[0] = obs.copy()
-        self.buffer.share_obs[0] = share_obs
-        self.buffer.obs[0] = obs
+        self.buffer.share_obs[0] = share_obs.copy()
+        self.buffer.obs[0] = obs.copy()
 
     @torch.no_grad()
     def collect(self, step):
@@ -124,24 +115,11 @@ class TrafficJunctionRunner(Runner):
         )
 
         # [n_envs*n_agents, ...] -> [n_envs, n_agents, ...]
-        # === ORIGINAL (kept for reference, commented out) ===
-        # values = np.array(np.split(_t2n(values), self.n_rollout_threads))
-        # actions = np.array(np.split(_t2n(actions), self.n_rollout_threads))
-        # action_log_probs = np.array(np.split(_t2n(action_log_probs), self.n_rollout_threads))
-        # rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
-        # rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
-        # `np.array(np.split(x, N))` on a (N*M, ...) row-major array equals
-        # x.reshape(N, M, ...) — one op vs. split-then-stack.
-        values = _t2n(values)
-        actions = _t2n(actions)
-        action_log_probs = _t2n(action_log_probs)
-        rnn_states = _t2n(rnn_states)
-        rnn_states_critic = _t2n(rnn_states_critic)
-        values = values.reshape(self.n_rollout_threads, -1, *values.shape[1:])
-        actions = actions.reshape(self.n_rollout_threads, -1, *actions.shape[1:])
-        action_log_probs = action_log_probs.reshape(self.n_rollout_threads, -1, *action_log_probs.shape[1:])
-        rnn_states = rnn_states.reshape(self.n_rollout_threads, -1, *rnn_states.shape[1:])
-        rnn_states_critic = rnn_states_critic.reshape(self.n_rollout_threads, -1, *rnn_states_critic.shape[1:])
+        values = np.array(np.split(_t2n(values), self.n_rollout_threads))
+        actions = np.array(np.split(_t2n(actions), self.n_rollout_threads))
+        action_log_probs = np.array(np.split(_t2n(action_log_probs), self.n_rollout_threads))
+        rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
+        rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
 
         actions_env = [actions[idx, :, 0] for idx in range(self.n_rollout_threads)]
 
@@ -153,21 +131,22 @@ class TrafficJunctionRunner(Runner):
         # get environment-level dones
         dones_env = np.all(dones, axis=-1)
 
-        # === ORIGINAL (kept for reference, commented out) ===
-        # for i in range(self.n_rollout_threads):
-        #     self.episode_rewards[i] += np.mean(rewards[i])
-        #     if dones_env[i]:
-        #         self.env_infos["episode_rewards"].append(self.episode_rewards[i])
-        #         success = infos[i].get('success', 0)
-        #         self.env_infos["win_rate"].append(float(success))
-        #         self.episode_rewards[i] = 0.0
-        # Vectorize the per-env mean; only iterate over actually-done envs.
-        self.episode_rewards += rewards.mean(axis=(1, 2))
-        for i in np.flatnonzero(dones_env):
-            self.env_infos["episode_rewards"].append(self.episode_rewards[i])
-            success = infos[i].get('success', 0)
-            self.env_infos["win_rate"].append(float(success))
-            self.episode_rewards[i] = 0.0
+        # Accumulate rewards for each environment and track episode completion
+        for i in range(self.n_rollout_threads):
+            # Add current step rewards
+            self.episode_rewards[i] += np.mean(rewards[i])
+
+            # Check if episode ended
+            if dones_env[i]:
+                # Record episode statistics ONLY when episode completes
+                self.env_infos["episode_rewards"].append(self.episode_rewards[i])
+
+                # Success rate (episodes without crashes)
+                success = infos[i].get('success', 0)
+                self.env_infos["win_rate"].append(float(success))
+                
+                # Reset trackers for next episode
+                self.episode_rewards[i] = 0.0
 
 
         # reset rnn and mask args for done envs
@@ -180,26 +159,17 @@ class TrafficJunctionRunner(Runner):
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents, 1), dtype=np.float32)
 
         # Extract active masks from environment info dict
-        # === ORIGINAL (kept for reference, commented out) ===
-        # active_masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
-        # for i in range(self.n_rollout_threads):
-        #     if isinstance(infos[i], dict) and 'alive_mask' in infos[i]:
-        #         alive_mask = infos[i]['alive_mask']
-        #         active_masks[i] = alive_mask.reshape(-1, 1).astype(np.float32)
-        # Write directly into the prealloc slice; the assignment handles dtype + reshape.
         active_masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
-        for i, info in enumerate(infos):
-            if isinstance(info, dict) and 'alive_mask' in info:
-                active_masks[i, :, 0] = info['alive_mask']
+        for i in range(self.n_rollout_threads):
+            if isinstance(infos[i], dict) and 'alive_mask' in infos[i]:
+                # alive_mask shape: (ncar,) -> reshape to (ncar, 1)
+                alive_mask = infos[i]['alive_mask']
+                active_masks[i] = alive_mask.reshape(-1, 1).astype(np.float32)
 
         # prepare shared obs
         if self.use_centralized_V:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
-            # === ORIGINAL (kept for reference, commented out) ===
-            # share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
+            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
 

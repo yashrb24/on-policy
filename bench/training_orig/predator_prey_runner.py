@@ -141,20 +141,13 @@ class PredatorPreyRunner(Runner):
         # replay buffer
         if self.use_centralized_V:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
-            # === ORIGINAL (kept for reference, commented out) ===
-            # share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
+            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
 
         # insert obs to buffer
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.buffer.share_obs[0] = share_obs.copy()
-        # self.buffer.obs[0] = obs.copy()
-        self.buffer.share_obs[0] = share_obs
-        self.buffer.obs[0] = obs
+        self.buffer.share_obs[0] = share_obs.copy()
+        self.buffer.obs[0] = obs.copy()
 
     @torch.no_grad()
     def collect(self, step):
@@ -170,22 +163,11 @@ class PredatorPreyRunner(Runner):
         )
 
         # [n_envs*n_agents, ...] -> [n_envs, n_agents, ...]
-        # === ORIGINAL (kept for reference, commented out) ===
-        # values = np.array(np.split(_t2n(values), self.n_rollout_threads))
-        # actions = np.array(np.split(_t2n(actions), self.n_rollout_threads))
-        # action_log_probs = np.array(np.split(_t2n(action_log_probs), self.n_rollout_threads))
-        # rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
-        # rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
-        values = _t2n(values)
-        actions = _t2n(actions)
-        action_log_probs = _t2n(action_log_probs)
-        rnn_states = _t2n(rnn_states)
-        rnn_states_critic = _t2n(rnn_states_critic)
-        values = values.reshape(self.n_rollout_threads, -1, *values.shape[1:])
-        actions = actions.reshape(self.n_rollout_threads, -1, *actions.shape[1:])
-        action_log_probs = action_log_probs.reshape(self.n_rollout_threads, -1, *action_log_probs.shape[1:])
-        rnn_states = rnn_states.reshape(self.n_rollout_threads, -1, *rnn_states.shape[1:])
-        rnn_states_critic = rnn_states_critic.reshape(self.n_rollout_threads, -1, *rnn_states_critic.shape[1:])
+        values = np.array(np.split(_t2n(values), self.n_rollout_threads))
+        actions = np.array(np.split(_t2n(actions), self.n_rollout_threads))
+        action_log_probs = np.array(np.split(_t2n(action_log_probs), self.n_rollout_threads))
+        rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
+        rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
 
         actions_env = [actions[idx, :, 0] for idx in range(self.n_rollout_threads)]
 
@@ -196,47 +178,40 @@ class PredatorPreyRunner(Runner):
 
         # get environment-level dones
         dones_env = np.all(dones, axis=-1)
-
-        # === ORIGINAL (kept for reference, commented out) ===
-        # for i in range(self.n_rollout_threads):
-        #     self.episode_rewards[i] += np.mean(rewards[i]) # TODO: only works for mixed case
-        #     self.episode_steps[i] += 1
-        #     if dones_env[i]:
-        #         self.env_infos["episode_rewards"].append(self.episode_rewards[i])
-        #         self.env_infos["episode_length"].append(self.episode_steps[i])
-        #         if self.all_args.mode == 'mixed':
-        #             self.env_infos["win_rate"].append(1.0)
-        #             self.env_infos["success_steps"].append(self.episode_steps[i])
-        #         else:
-        #             success = infos[i].get('success', 0)
-        #             self.env_infos["win_rate"].append(float(success))
-        #             if success:
-        #                 self.env_infos["success_steps"].append(self.episode_steps[i])
-        #         if 'predators_on_prey' in infos[i]:
-        #             partial = infos[i]['predators_on_prey'] / self.num_agents
-        #             self.env_infos["partial_success_rate"].append(partial)
-        #         self.episode_rewards[i] = 0.0
-        #         self.episode_steps[i] = 0
-        #         self.episodes_completed += 1
-        self.episode_rewards += rewards.mean(axis=(1, 2))
-        self.episode_steps += 1
-        for i in np.flatnonzero(dones_env):
-            self.env_infos["episode_rewards"].append(self.episode_rewards[i])
-            self.env_infos["episode_length"].append(self.episode_steps[i])
-            if self.all_args.mode == 'mixed':
-                self.env_infos["win_rate"].append(1.0)
-                self.env_infos["success_steps"].append(self.episode_steps[i])
-            else:
-                success = infos[i].get('success', 0)
-                self.env_infos["win_rate"].append(float(success))
-                if success:
+        
+        # Accumulate rewards for each environment and track episode completion
+        for i in range(self.n_rollout_threads):
+            # Add current step rewards
+            self.episode_rewards[i] += np.mean(rewards[i]) # TODO: only works for mixed case
+            self.episode_steps[i] += 1
+            
+            # Check if episode ended
+            if dones_env[i]:
+                # Record episode statistics ONLY when episode completes
+                self.env_infos["episode_rewards"].append(self.episode_rewards[i])
+                self.env_infos["episode_length"].append(self.episode_steps[i])
+                
+                # Record win rate based on mode
+                if self.all_args.mode == 'mixed':
+                    # Mixed mode: episode ends only on success
+                    self.env_infos["win_rate"].append(1.0)
                     self.env_infos["success_steps"].append(self.episode_steps[i])
-            if 'predators_on_prey' in infos[i]:
-                partial = infos[i]['predators_on_prey'] / self.num_agents
-                self.env_infos["partial_success_rate"].append(partial)
-            self.episode_rewards[i] = 0.0
-            self.episode_steps[i] = 0
-            self.episodes_completed += 1
+                else:
+                    # Other modes: check info dict for success
+                    success = infos[i].get('success', 0)
+                    self.env_infos["win_rate"].append(float(success))
+                    if success:
+                        self.env_infos["success_steps"].append(self.episode_steps[i])
+                
+                # Track partial success if available
+                if 'predators_on_prey' in infos[i]:
+                    partial = infos[i]['predators_on_prey'] / self.num_agents
+                    self.env_infos["partial_success_rate"].append(partial)
+                
+                # Reset trackers for next episode
+                self.episode_rewards[i] = 0.0
+                self.episode_steps[i] = 0
+                self.episodes_completed += 1
 
         # reset rnn and mask args for done envs
         rnn_states[dones_env == True] = np.zeros(
@@ -250,11 +225,7 @@ class PredatorPreyRunner(Runner):
         # prepare shared obs
         if self.use_centralized_V:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
-            # === ORIGINAL (kept for reference, commented out) ===
-            # share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
+            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
 
