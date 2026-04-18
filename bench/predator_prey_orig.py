@@ -25,10 +25,6 @@ import numpy as np
 from gym import spaces
 from ipdb import set_trace
 
-# === OPTIMIZED (2026-04-18): action -> (dy, dx) lookup for the vectorized _apply_actions ===
-# Rows: 0 UP, 1 RIGHT, 2 DOWN, 3 LEFT, 4 STAY — same semantics as the original elif chain.
-_ACTION_DELTAS = np.array([[-1, 0], [0, 1], [1, 0], [0, -1], [0, 0]], dtype=int)
-
 
 class PredatorPreyEnv(gym.Env):
 
@@ -103,8 +99,6 @@ class PredatorPreyEnv(gym.Env):
         self.observation_space = [spaces.Box(low=0, high=1,
                                              shape=(obs_dim,),
                                              dtype=np.float32) for _ in range(self.n_agents)]
-        # === OPTIMIZED (2026-04-18): precompute patch offset vector for vectorized gather in _get_obs ===
-        self._patch_idx = np.arange(2 * self.vision + 1)
         # Actual observation will be of the shape 1 * n_agents * (2v+1) * (2v+1) * vocab_size
         tmp_obs = self.reset()
         share_obs_dim = int(np.prod(tmp_obs[0].shape)) * self.n_agents
@@ -132,24 +126,13 @@ class PredatorPreyEnv(gym.Env):
         """
         if self.episode_over:
             raise RuntimeError("Episode is done")
-        # === OPTIMIZED (2026-04-18): single-alloc action coercion + assert-before-apply ===
-        # NOTE: I attempted to replace the per-agent loop with a vectorized _apply_actions (clip + fancy indexing).
-        # At N=10 predators, the numpy-dispatch overhead on np.clip was ~5us/call vs ~0.7us for the original
-        # elif-chain _take_action — a net regression. Reverting to the per-agent loop. _apply_actions is retained
-        # below as commented-out code for reference if someone wants to test larger N or faster numpy paths.
-        action = np.atleast_1d(np.asarray(action).squeeze())
-        assert np.all(action <= self.naction), "Actions should be in the range [0,naction)."
+        action = np.array(action).squeeze()
+        action = np.atleast_1d(action)
+
         for i, a in enumerate(action):
             self._take_action(i, a)
 
-        # === ORIGINAL (kept for reference, commented out) ===
-        # action = np.array(action).squeeze()
-        # action = np.atleast_1d(action)
-        #
-        # for i, a in enumerate(action):
-        #     self._take_action(i, a)
-        #
-        # assert np.all(action <= self.naction), "Actions should be in the range [0,naction)."
+        assert np.all(action <= self.naction), "Actions should be in the range [0,naction)."
 
         self.obs = self._get_obs()
         reward = self._get_reward()
@@ -239,92 +222,33 @@ class PredatorPreyEnv(gym.Env):
 
         self.empty_bool_base_grid = self._onehot_initialization(self.grid)
 
-        # === OPTIMIZED (2026-04-18): bake fixed prey into empty grid + init persistent predator-mark tracker ===
-        # Prey are fixed (moving_prey raises NotImplementedError), so marking them once at reset mirrors what the
-        # original did every _get_obs call. Only predator marks need incremental un-mark/re-mark per step.
-        for p in self.prey_loc:
-            self.empty_bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.PREY_CLASS] += 1
-        # Persistent working grid. Invariant: bool_base_grid == empty_bool_base_grid + (+1 per padded position in
-        # _last_pred_padded, on the PREDATOR_CLASS channel). Initialize as if previous step had all predators at (0,0).
-        self.bool_base_grid = self.empty_bool_base_grid.copy()
-        self.bool_base_grid[self.vision, self.vision, self.PREDATOR_CLASS] += self.npredator
-        self._last_pred_padded = np.full((self.npredator, 2), self.vision, dtype=int)
-
     def _get_obs(self):
-        # === OPTIMIZED (2026-04-18): incremental predator marks + vectorized vision-patch gather ===
-        # Prey are baked into empty_bool_base_grid at reset (_set_grid), so only predator marks change per step.
-        # Instead of a per-agent Python slicing loop, use fancy indexing to gather all vision patches in one op.
-        v = self.vision
-        last = self._last_pred_padded
+        self.bool_base_grid = self.empty_bool_base_grid.copy()
 
-        # Undo previous predator marks.
-        for i in range(self.npredator):
-            self.bool_base_grid[last[i, 0], last[i, 1], self.PREDATOR_CLASS] -= 1
-        # Apply current predator marks and record positions.
-        for i in range(self.npredator):
-            py = self.predator_loc[i, 0] + v
-            px = self.predator_loc[i, 1] + v
-            self.bool_base_grid[py, px, self.PREDATOR_CLASS] += 1
-            last[i, 0] = py
-            last[i, 1] = px
+        for i, p in enumerate(self.predator_loc):
+            self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.PREDATOR_CLASS] += 1
 
-        # Vectorized vision-patch gather via fancy indexing.
-        patch = self._patch_idx
-        locs = self.predator_loc
-        rows = (locs[:, 0:1] + patch)[:, :, None]
-        cols = (locs[:, 1:2] + patch)[:, None, :]
-        obs = self.bool_base_grid[rows, cols]  # (npredator, 2v+1, 2v+1, vocab_size)
+        for i, p in enumerate(self.prey_loc):
+            self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.PREY_CLASS] += 1
+
+        obs = []
+        for p in self.predator_loc:
+            slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
+            slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
+            obs.append(self.bool_base_grid[slice_y, slice_x])
 
         if self.enemy_comm:
-            plocs = self.prey_loc
-            prows = (plocs[:, 0:1] + patch)[:, :, None]
-            pcols = (plocs[:, 1:2] + patch)[:, None, :]
-            prey_obs = self.bool_base_grid[prows, pcols]
-            obs = np.concatenate([obs, prey_obs], axis=0)
+            for p in self.prey_loc:
+                slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
+                slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
+                obs.append(self.bool_base_grid[slice_y, slice_x])
 
-        return obs.reshape(obs.shape[0], -1)
-
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.bool_base_grid = self.empty_bool_base_grid.copy()
-        #
-        # for i, p in enumerate(self.predator_loc):
-        #     self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.PREDATOR_CLASS] += 1
-        #
-        # for i, p in enumerate(self.prey_loc):
-        #     self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.PREY_CLASS] += 1
-        #
-        # obs = []
-        # for p in self.predator_loc:
-        #     slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
-        #     slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
-        #     obs.append(self.bool_base_grid[slice_y, slice_x])
-        #
-        # if self.enemy_comm:
-        #     for p in self.prey_loc:
-        #         slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
-        #         slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
-        #         obs.append(self.bool_base_grid[slice_y, slice_x])
-        #
-        # obs = np.stack(obs)
-        # # Flatten each agent's observation to 1D
-        # obs = obs.reshape(obs.shape[0], -1)
-        # return obs
-
-    def _apply_actions(self, actions):
-        # === UNUSED (2026-04-18): vectorized action apply — REGRESSION at small N (=10) ===
-        # This was intended to replace the per-agent _take_action loop but profiling showed np.clip dispatch
-        # overhead (~5us/call) beat the savings at npredator=10. Retained here in case a larger-N deployment
-        # makes the trade-off favorable; step() currently uses the per-agent loop for speed.
-        acts = actions[:self.npredator].astype(int)
-        movable = (self.reached_prey == 0)
-        deltas = _ACTION_DELTAS[acts] * movable[:, None]
-        new_loc = self.predator_loc + deltas
-        np.clip(new_loc[:, 0], 0, self.dims[0] - 1, out=new_loc[:, 0])
-        np.clip(new_loc[:, 1], 0, self.dims[1] - 1, out=new_loc[:, 1])
-        self.predator_loc = new_loc
+        obs = np.stack(obs)
+        # Flatten each agent's observation to 1D
+        obs = obs.reshape(obs.shape[0], -1)
+        return obs
 
     def _take_action(self, idx, act):
-        # NOTE: retained for reference; no longer on the hot path — step() now calls self._apply_actions(action).
         # prey action
         if idx >= self.npredator:
             # fixed prey
