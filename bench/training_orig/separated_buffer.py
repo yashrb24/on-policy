@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from collections import defaultdict
-from .util import check, get_shape_from_obs_space, get_shape_from_act_space
+from onpolicy.utils.util import check, get_shape_from_obs_space, get_shape_from_act_space
 
 def _flatten(T, N, x):
     return x.reshape(T * N, *x.shape[2:])
@@ -64,108 +64,60 @@ class SeparatedReplayBuffer(object):
 
     def insert(self, share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs,
                value_preds, rewards, masks, bad_masks=None, active_masks=None, available_actions=None):
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.share_obs[self.step + 1] = share_obs.copy()
-        # self.obs[self.step + 1] = obs.copy()
-        # self.rnn_states[self.step + 1] = rnn_states.copy()
-        # self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
-        # self.actions[self.step] = actions.copy()
-        # self.action_log_probs[self.step] = action_log_probs.copy()
-        # self.value_preds[self.step] = value_preds.copy()
-        # self.rewards[self.step] = rewards.copy()
-        # self.masks[self.step + 1] = masks.copy()
-        # if bad_masks is not None:
-        #     self.bad_masks[self.step + 1] = bad_masks.copy()
-        # if active_masks is not None:
-        #     self.active_masks[self.step + 1] = active_masks.copy()
-        # if available_actions is not None:
-        #     self.available_actions[self.step + 1] = available_actions.copy()
-        # Slice-assignment already copies element-wise into the preallocated slot.
-        self.share_obs[self.step + 1] = share_obs
-        self.obs[self.step + 1] = obs
-        self.rnn_states[self.step + 1] = rnn_states
-        self.rnn_states_critic[self.step + 1] = rnn_states_critic
-        self.actions[self.step] = actions
-        self.action_log_probs[self.step] = action_log_probs
-        self.value_preds[self.step] = value_preds
-        self.rewards[self.step] = rewards
-        self.masks[self.step + 1] = masks
+        self.share_obs[self.step + 1] = share_obs.copy()
+        self.obs[self.step + 1] = obs.copy()
+        self.rnn_states[self.step + 1] = rnn_states.copy()
+        self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
+        self.actions[self.step] = actions.copy()
+        self.action_log_probs[self.step] = action_log_probs.copy()
+        self.value_preds[self.step] = value_preds.copy()
+        self.rewards[self.step] = rewards.copy()
+        self.masks[self.step + 1] = masks.copy()
         if bad_masks is not None:
-            self.bad_masks[self.step + 1] = bad_masks
+            self.bad_masks[self.step + 1] = bad_masks.copy()
         if active_masks is not None:
-            self.active_masks[self.step + 1] = active_masks
+            self.active_masks[self.step + 1] = active_masks.copy()
         if available_actions is not None:
-            self.available_actions[self.step + 1] = available_actions
+            self.available_actions[self.step + 1] = available_actions.copy()
 
         self.step = (self.step + 1) % self.episode_length
 
     def chooseinsert(self, share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs,
                      value_preds, rewards, masks, bad_masks=None, active_masks=None, available_actions=None):
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.share_obs[self.step] = share_obs.copy()
-        # self.obs[self.step] = obs.copy()
-        # self.rnn_states[self.step + 1] = rnn_states.copy()
-        # self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
-        # self.actions[self.step] = actions.copy()
-        # self.action_log_probs[self.step] = action_log_probs.copy()
-        # self.value_preds[self.step] = value_preds.copy()
-        # self.rewards[self.step] = rewards.copy()
-        # self.masks[self.step + 1] = masks.copy()
-        # if bad_masks is not None:
-        #     self.bad_masks[self.step + 1] = bad_masks.copy()
-        # if active_masks is not None:
-        #     self.active_masks[self.step] = active_masks.copy()
-        # if available_actions is not None:
-        #     self.available_actions[self.step] = available_actions.copy()
-        self.share_obs[self.step] = share_obs
-        self.obs[self.step] = obs
-        self.rnn_states[self.step + 1] = rnn_states
-        self.rnn_states_critic[self.step + 1] = rnn_states_critic
-        self.actions[self.step] = actions
-        self.action_log_probs[self.step] = action_log_probs
-        self.value_preds[self.step] = value_preds
-        self.rewards[self.step] = rewards
-        self.masks[self.step + 1] = masks
+        self.share_obs[self.step] = share_obs.copy()
+        self.obs[self.step] = obs.copy()
+        self.rnn_states[self.step + 1] = rnn_states.copy()
+        self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
+        self.actions[self.step] = actions.copy()
+        self.action_log_probs[self.step] = action_log_probs.copy()
+        self.value_preds[self.step] = value_preds.copy()
+        self.rewards[self.step] = rewards.copy()
+        self.masks[self.step + 1] = masks.copy()
         if bad_masks is not None:
-            self.bad_masks[self.step + 1] = bad_masks
+            self.bad_masks[self.step + 1] = bad_masks.copy()
         if active_masks is not None:
-            self.active_masks[self.step] = active_masks
+            self.active_masks[self.step] = active_masks.copy()
         if available_actions is not None:
-            self.available_actions[self.step] = available_actions
+            self.available_actions[self.step] = available_actions.copy()
 
         self.step = (self.step + 1) % self.episode_length
-
+    
     def after_update(self):
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.share_obs[0] = self.share_obs[-1].copy()
-        # self.obs[0] = self.obs[-1].copy()
-        # self.rnn_states[0] = self.rnn_states[-1].copy()
-        # self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
-        # self.masks[0] = self.masks[-1].copy()
-        # self.bad_masks[0] = self.bad_masks[-1].copy()
-        # self.active_masks[0] = self.active_masks[-1].copy()
-        # if self.available_actions is not None:
-        #     self.available_actions[0] = self.available_actions[-1].copy()
-        self.share_obs[0] = self.share_obs[-1]
-        self.obs[0] = self.obs[-1]
-        self.rnn_states[0] = self.rnn_states[-1]
-        self.rnn_states_critic[0] = self.rnn_states_critic[-1]
-        self.masks[0] = self.masks[-1]
-        self.bad_masks[0] = self.bad_masks[-1]
-        self.active_masks[0] = self.active_masks[-1]
+        self.share_obs[0] = self.share_obs[-1].copy()
+        self.obs[0] = self.obs[-1].copy()
+        self.rnn_states[0] = self.rnn_states[-1].copy()
+        self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
+        self.masks[0] = self.masks[-1].copy()
+        self.bad_masks[0] = self.bad_masks[-1].copy()
+        self.active_masks[0] = self.active_masks[-1].copy()
         if self.available_actions is not None:
-            self.available_actions[0] = self.available_actions[-1]
+            self.available_actions[0] = self.available_actions[-1].copy()
 
     def chooseafter_update(self):
-        # === ORIGINAL (kept for reference, commented out) ===
-        # self.rnn_states[0] = self.rnn_states[-1].copy()
-        # self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
-        # self.masks[0] = self.masks[-1].copy()
-        # self.bad_masks[0] = self.bad_masks[-1].copy()
-        self.rnn_states[0] = self.rnn_states[-1]
-        self.rnn_states_critic[0] = self.rnn_states_critic[-1]
-        self.masks[0] = self.masks[-1]
-        self.bad_masks[0] = self.bad_masks[-1]
+        self.rnn_states[0] = self.rnn_states[-1].copy()
+        self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
+        self.masks[0] = self.masks[-1].copy()
+        self.bad_masks[0] = self.bad_masks[-1].copy()
 
     def compute_returns(self, next_value, value_normalizer=None):
         """
@@ -175,27 +127,13 @@ class SeparatedReplayBuffer(object):
             if self._use_gae:
                 self.value_preds[-1] = next_value
                 gae = 0
-                # === ORIGINAL (kept for reference, commented out) ===
-                # for step in reversed(range(self.rewards.shape[0])):
-                #     if self._use_popart or self._use_valuenorm:
-                #         delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[
-                #             step + 1]) * self.masks[step + 1] - value_normalizer.denormalize(self.value_preds[step])
-                #         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
-                #         gae = gae * self.bad_masks[step + 1]
-                #         self.returns[step] = gae + value_normalizer.denormalize(self.value_preds[step])
-                # Cache denormalize across iterations (reverse walk: vp[step+1] at iter k
-                # == vp[step] at iter k+1) and within iteration (reuse for delta and returns).
-                if self._use_popart or self._use_valuenorm:
-                    v_next_denorm = value_normalizer.denormalize(self.value_preds[-1])
                 for step in reversed(range(self.rewards.shape[0])):
                     if self._use_popart or self._use_valuenorm:
-                        v_curr_denorm = value_normalizer.denormalize(self.value_preds[step])
-                        delta = self.rewards[step] + self.gamma * v_next_denorm * self.masks[step + 1] \
-                                - v_curr_denorm
+                        delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[
+                            step + 1]) * self.masks[step + 1] - value_normalizer.denormalize(self.value_preds[step])
                         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
                         gae = gae * self.bad_masks[step + 1]
-                        self.returns[step] = gae + v_curr_denorm
-                        v_next_denorm = v_curr_denorm
+                        self.returns[step] = gae + value_normalizer.denormalize(self.value_preds[step])
                     else:
                         delta = self.rewards[step] + self.gamma * self.value_preds[step + 1] * self.masks[step + 1] - self.value_preds[step]
                         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
@@ -214,22 +152,11 @@ class SeparatedReplayBuffer(object):
             if self._use_gae:
                 self.value_preds[-1] = next_value
                 gae = 0
-                # === ORIGINAL (kept for reference, commented out) ===
-                # for step in reversed(range(self.rewards.shape[0])):
-                #     if self._use_popart or self._use_valuenorm:
-                #         delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[step + 1]) * self.masks[step + 1] - value_normalizer.denormalize(self.value_preds[step])
-                #         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
-                #         self.returns[step] = gae + value_normalizer.denormalize(self.value_preds[step])
-                if self._use_popart or self._use_valuenorm:
-                    v_next_denorm = value_normalizer.denormalize(self.value_preds[-1])
                 for step in reversed(range(self.rewards.shape[0])):
                     if self._use_popart or self._use_valuenorm:
-                        v_curr_denorm = value_normalizer.denormalize(self.value_preds[step])
-                        delta = self.rewards[step] + self.gamma * v_next_denorm * self.masks[step + 1] \
-                                - v_curr_denorm
+                        delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[step + 1]) * self.masks[step + 1] - value_normalizer.denormalize(self.value_preds[step])
                         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
-                        self.returns[step] = gae + v_curr_denorm
-                        v_next_denorm = v_curr_denorm
+                        self.returns[step] = gae + value_normalizer.denormalize(self.value_preds[step])
                     else:
                         delta = self.rewards[step] + self.gamma * self.value_preds[step + 1] * self.masks[step + 1] - self.value_preds[step]
                         gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
