@@ -24,7 +24,7 @@ import random
 import gym
 from gym import spaces
 
-from .traffic_helper import *
+from onpolicy.envs.traffic_junction.traffic_helper import *
 
 
 def nPr(n, r):
@@ -158,17 +158,6 @@ class TrafficJunctionEnv(gym.Env):
         else:
             self._set_paths(difficulty)
 
-        # === OPTIMIZED (2026-04-18): persistent obs buffers ===
-        # Keep single_obs_dim accessible for preallocated scratch buffers.
-        self._single_obs_dim = single_obs_dim
-        # Persistent bool_base_grid avoids per-step full copy.
-        # Invariant: bool_base_grid == empty_bool_base_grid + (+1 at each padded cell in _last_car_padded, CAR_CLASS channel).
-        # At construction time, _last_car_padded is all (vision, vision) — matches a first reset where all cars are at (0,0).
-        self.bool_base_grid = self.empty_bool_base_grid.copy()
-        self.bool_base_grid[self.vision, self.vision, self.CAR_CLASS] += self.ncar
-        self._last_car_padded = np.full((self.ncar, 2), self.vision, dtype=int)
-        self._obs_scratch = np.zeros((self.ncar, self._single_obs_dim), dtype=np.float64)
-
         return
 
     def reset(self, epoch=None):
@@ -217,12 +206,6 @@ class TrafficJunctionEnv(gym.Env):
         if epoch is not None and epoch_range > 0 and add_rate_range > 0 and epoch > self.epoch_last_update:
             self.curriculum(epoch)
             self.epoch_last_update = epoch
-
-        # === OPTIMIZED (2026-04-18): re-sync persistent obs buffers on reset ===
-        # Mirror the construction-time invariant so the first _get_obs call matches the original's copy-then-mark semantics.
-        np.copyto(self.bool_base_grid, self.empty_bool_base_grid)
-        self.bool_base_grid[self.vision, self.vision, self.CAR_CLASS] += self.ncar
-        self._last_car_padded[:] = self.vision
 
         # Observation will be ncar * vision * vision ndarray
         obs = self._get_obs()
@@ -375,117 +358,60 @@ class TrafficJunctionEnv(gym.Env):
         self.empty_bool_base_grid = self._onehot_initialization(self.pad_grid)
 
     def _get_obs(self):
-        # === OPTIMIZED (2026-04-18): incremental grid update + preallocated obs buffer ===
-        # Instead of `self.bool_base_grid = self.empty_bool_base_grid.copy()` every step (O(pad_h*pad_w*vocab_size)),
-        # undo the previous step's CAR_CLASS marks in-place then apply the current ones (O(ncar)).
-        # Instead of per-agent np.concatenate([atleast_1d(act), atleast_1d(r_i), v_sq.flatten()]), fill a preallocated
-        # 2D float64 buffer and return tuple(buf.copy()) — preserves the original tuple-of-1d-arrays return type.
         h, w = self.dims
-        v = self.vision
+        self.bool_base_grid = self.empty_bool_base_grid.copy()
 
-        # Undo previous CAR_CLASS marks.
-        last = self._last_car_padded
-        for i in range(self.ncar):
-            self.bool_base_grid[last[i, 0], last[i, 1], self.CAR_CLASS] -= 1
-        # Apply current CAR_CLASS marks and record positions.
-        for i in range(self.ncar):
-            py = self.car_loc[i, 0] + v
-            px = self.car_loc[i, 1] + v
-            self.bool_base_grid[py, px, self.CAR_CLASS] += 1
-            last[i, 0] = py
-            last[i, 1] = px
+        # Mark cars' location in Bool grid
+        for i, p in enumerate(self.car_loc):
+            self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.CAR_CLASS] += 1
 
-        # For scalar mode, the original strips channel 0 (OUTSIDE class) via a non-in-place slice — keep a local view.
+        # remove the outside class.
         if self.vocab_type == 'scalar':
-            grid_view = self.bool_base_grid[:, :, 1:]
-        else:
-            grid_view = self.bool_base_grid
+            self.bool_base_grid = self.bool_base_grid[:, :, 1:]
 
-        obs_out = self._obs_scratch
-        obs_out.fill(0.0)
+        obs = []
+        for i, p in enumerate(self.car_loc):
+            # most recent action
+            act = self.car_last_act[i] / (self.naction - 1)
 
-        if self.vocab_type == 'bool':
-            v_off = 2
-            for i in range(self.ncar):
-                if self.alive_mask[i] == 0:
-                    continue  # leave row zero — matches original's zero-all-fields-then-concat branch
-                p = self.car_loc[i]
-                obs_out[i, 0] = self.car_last_act[i] / (self.naction - 1)
-                obs_out[i, 1] = self.route_id[i] / (self.npath - 1)
-                v_sq = grid_view[p[0]:p[0] + 2 * v + 1, p[1]:p[1] + 2 * v + 1]
-                obs_out[i, v_off:] = v_sq.flatten()
-        else:
-            v_off = 4
-            denom_y = h - 1
-            denom_x = w - 1
-            for i in range(self.ncar):
-                if self.alive_mask[i] == 0:
-                    continue
-                p = self.car_loc[i]
-                obs_out[i, 0] = self.car_last_act[i] / (self.naction - 1)
-                obs_out[i, 1] = self.route_id[i] / (self.npath - 1)
-                obs_out[i, 2] = p[0] / denom_y
-                obs_out[i, 3] = p[1] / denom_x
-                v_sq = grid_view[p[0]:p[0] + 2 * v + 1, p[1]:p[1] + 2 * v + 1]
-                obs_out[i, v_off:] = v_sq.flatten()
+            # route id
+            r_i = self.route_id[i] / (self.npath - 1)
 
-        return tuple(obs_out.copy())
+            # loc
+            p_norm = p / (h - 1, w - 1)
 
-        # === ORIGINAL (kept for reference, commented out) ===
-        # h, w = self.dims
-        # self.bool_base_grid = self.empty_bool_base_grid.copy()
-        #
-        # # Mark cars' location in Bool grid
-        # for i, p in enumerate(self.car_loc):
-        #     self.bool_base_grid[p[0] + self.vision, p[1] + self.vision, self.CAR_CLASS] += 1
-        #
-        # # remove the outside class.
-        # if self.vocab_type == 'scalar':
-        #     self.bool_base_grid = self.bool_base_grid[:, :, 1:]
-        #
-        # obs = []
-        # for i, p in enumerate(self.car_loc):
-        #     # most recent action
-        #     act = self.car_last_act[i] / (self.naction - 1)
-        #
-        #     # route id
-        #     r_i = self.route_id[i] / (self.npath - 1)
-        #
-        #     # loc
-        #     p_norm = p / (h - 1, w - 1)
-        #
-        #     # vision square
-        #     slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
-        #     slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
-        #     v_sq = self.bool_base_grid[slice_y, slice_x]
-        #
-        #     # when dead, all obs are 0. But should be masked by trainer.
-        #     if self.alive_mask[i] == 0:
-        #         act = np.zeros_like(act)
-        #         r_i = np.zeros_like(r_i)
-        #         p_norm = np.zeros_like(p_norm)
-        #         v_sq = np.zeros_like(v_sq)
-        #
-        #     if self.vocab_type == 'bool':
-        #         # o = tuple((act, r_i, v_sq))
-        #         o = np.concatenate((
-        #             np.atleast_1d(act),
-        #             np.atleast_1d(r_i),
-        #             v_sq.flatten()
-        #         ))
-        #     else:
-        #         # o = tuple((act, r_i, p_norm, v_sq))
-        #         o = np.concatenate((
-        #             np.atleast_1d(act),
-        #             np.atleast_1d(r_i),
-        #             p_norm.flatten(),
-        #             v_sq.flatten()
-        #         ))
-        #     obs.append(o)
-        #
-        # obs = tuple(obs)
-        #
-        # return obs
+            # vision square
+            slice_y = slice(p[0], p[0] + (2 * self.vision) + 1)
+            slice_x = slice(p[1], p[1] + (2 * self.vision) + 1)
+            v_sq = self.bool_base_grid[slice_y, slice_x]
+
+            # when dead, all obs are 0. But should be masked by trainer.
+            if self.alive_mask[i] == 0:
+                act = np.zeros_like(act)
+                r_i = np.zeros_like(r_i)
+                p_norm = np.zeros_like(p_norm)
+                v_sq = np.zeros_like(v_sq)
+
+            if self.vocab_type == 'bool':
+                # o = tuple((act, r_i, v_sq))
+                o = np.concatenate((
+                    np.atleast_1d(act),
+                    np.atleast_1d(r_i),
+                    v_sq.flatten()
+                ))
+            else:
+                # o = tuple((act, r_i, p_norm, v_sq))
+                o = np.concatenate((
+                    np.atleast_1d(act),
+                    np.atleast_1d(r_i),
+                    p_norm.flatten(),
+                    v_sq.flatten()
+                ))
+            obs.append(o)
+
+        obs = tuple(obs)
+
+        return obs
 
     def _add_cars(self):
         for r_i, routes in enumerate(self.routes):
@@ -674,10 +600,8 @@ class TrafficJunctionEnv(gym.Env):
                 self.alive_mask[idx] = 0
                 self.wait[idx] = 0
 
-                # === OPTIMIZED (2026-04-18): broadcast zero-assign to avoid per-call allocation ===
-                self.car_loc[idx] = 0
-                # === ORIGINAL (kept for reference) ===
-                # self.car_loc[idx] = np.zeros(len(self.dims), dtype=int)
+                # put it at dead loc
+                self.car_loc[idx] = np.zeros(len(self.dims), dtype=int)
                 self.is_completed[idx] = 1
                 return
 
@@ -695,34 +619,17 @@ class TrafficJunctionEnv(gym.Env):
             self.car_last_act[idx] = 0
 
     def _get_reward(self):
-        # === OPTIMIZED (2026-04-18): vectorized collision detection ===
-        # Original was O(N^2) with a Python-level loop + np.where per car; this does one pairwise-equality reduction.
-        # `car_loc.any(axis=1)` matches the original's `l.any()` gate (car at (0,0) treated as dead for collisions).
-        reward = self.TIMESTEP_PENALTY * self.wait
-        loc = self.car_loc
-        alive_loc = loc.any(axis=1)
-        same = (loc[:, None, :] == loc[None, :, :]).all(axis=2)
-        np.fill_diagonal(same, False)
-        valid = alive_loc[:, None] & alive_loc[None, :]
-        collides = (same & valid).any(axis=1)
-        if collides.any():
-            reward = reward + collides * self.CRASH_PENALTY
-            self.has_failed = 1
-        reward = self.alive_mask * reward
-        return np.expand_dims(reward, -1)
+        reward = np.full(self.ncar, self.TIMESTEP_PENALTY) * self.wait
 
-        # === ORIGINAL (kept for reference, commented out) ===
-        # reward = np.full(self.ncar, self.TIMESTEP_PENALTY) * self.wait
-        #
-        # for i, l in enumerate(self.car_loc):
-        #     if (len(np.where(np.all(self.car_loc[:i] == l, axis=1))[0]) or \
-        #         len(np.where(np.all(self.car_loc[i + 1:] == l, axis=1))[0])) and l.any():
-        #         reward[i] += self.CRASH_PENALTY
-        #         self.has_failed = 1
-        #
-        # reward = self.alive_mask * reward
-        # reward = np.expand_dims(reward, -1)
-        # return reward
+        for i, l in enumerate(self.car_loc):
+            if (len(np.where(np.all(self.car_loc[:i] == l, axis=1))[0]) or \
+                len(np.where(np.all(self.car_loc[i + 1:] == l, axis=1))[0])) and l.any():
+                reward[i] += self.CRASH_PENALTY
+                self.has_failed = 1
+
+        reward = self.alive_mask * reward
+        reward = np.expand_dims(reward, -1)
+        return reward
 
     def _onehot_initialization(self, a):
         if self.vocab_type == 'bool':
@@ -742,14 +649,10 @@ class TrafficJunctionEnv(gym.Env):
         return np.zeros_like(self._get_reward())
 
     def _choose_dead(self):
-        # === OPTIMIZED (2026-04-18): flatnonzero in one call vs arange + boolean mask ===
-        # RNG-equivalent to the original: np.random.choice consumes the same number of draws given the same candidate pool.
-        return self.np_random.choice(np.flatnonzero(self.alive_mask == 0))
-        # === ORIGINAL (kept for reference) ===
-        # # all idx
-        # car_idx = np.arange(len(self.alive_mask))
-        # # random choice of idx from dead ones.
-        # return self.np_random.choice(car_idx[self.alive_mask == 0])
+        # all idx
+        car_idx = np.arange(len(self.alive_mask))
+        # random choice of idx from dead ones.
+        return self.np_random.choice(car_idx[self.alive_mask == 0])
 
     def curriculum(self, epoch):
         step_size = 0.01
