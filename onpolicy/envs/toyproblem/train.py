@@ -28,6 +28,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entropy_coef", type=float, default=0.03)
     p.add_argument("--max_grad_norm", type=float, default=0.5)
     p.add_argument("--z_dim", type=int, default=3)
+    p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd"])
+    p.add_argument("--delta", type=float, default=1.0)
+    p.add_argument("--lambda_comms", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--log_dir", type=str, default="runs/toyproblem")
@@ -54,6 +57,9 @@ def main() -> None:
         max_grad_norm=args.max_grad_norm,
         update_epochs=args.update_epochs,
         num_minibatches=args.num_minibatches,
+        channel=args.channel,
+        delta=args.delta,
+        lambda_comms=args.lambda_comms,
     )
     trainer = MAPPOTrainer(config, device=device)
     buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
@@ -65,7 +71,8 @@ def main() -> None:
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
         "update", "timestep", "mean_reward", "success_rate",
-        "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "sps",
+        "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+        "comms_loss", "bits_per_msg", "z_norm", "sps",
     ])
 
     n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
@@ -125,7 +132,8 @@ def main() -> None:
         csv_writer.writerow([
             update, timestep, mean_reward, success_rate,
             metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
-            metrics["approx_kl"], metrics["clip_frac"], sps,
+            metrics["approx_kl"], metrics["clip_frac"],
+            metrics["comms_loss"], metrics["bits_per_msg"], metrics["z_norm"], sps,
         ])
         csv_file.flush()
 
@@ -135,11 +143,16 @@ def main() -> None:
                 f"reward={mean_reward:+.3f} success={success_rate:.2f} "
                 f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
                 f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
-                f"clip={metrics['clip_frac']:.2f} sps={sps:.0f}"
+                f"clip={metrics['clip_frac']:.2f} bits={metrics['bits_per_msg']:.2f} "
+                f"sps={sps:.0f}"
             )
 
     csv_file.close()
-    print(f"Done. Logs at {csv_path}")
+
+    ckpt_path = log_dir / "final.pt"
+    torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)
+
+    print(f"Done. Logs at {csv_path}, ckpt at {ckpt_path}")
 
 
 if __name__ == "__main__":

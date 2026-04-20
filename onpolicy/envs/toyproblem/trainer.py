@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from onpolicy.envs.toyproblem.buffer import RolloutBuffer
+from onpolicy.envs.toyproblem.channels import build_channel
 from onpolicy.envs.toyproblem.network import Critic, ListenerActor, SpeakerNetwork
 from onpolicy.utils.valuenorm import ValueNorm
 
@@ -22,6 +23,9 @@ class MAPPOConfig:
     update_epochs: int = 10
     num_minibatches: int = 4
     adam_eps: float = 1e-5
+    channel: str = "none"
+    delta: float = 1.0
+    lambda_comms: float = 0.0
 
 
 class MAPPOTrainer(nn.Module):
@@ -42,12 +46,14 @@ class MAPPOTrainer(nn.Module):
             obs_dim=2 + config.z_dim, action_dim=5
         ).to(device)
         self.critic = Critic(state_dim=4).to(device)
+        self.channel = build_channel(config.channel, config.delta).to(device)
         self.value_norm = ValueNorm(input_shape=1, device=device)
 
         self._trainable = (
             list(self.speaker.parameters())
             + list(self.listener.parameters())
             + list(self.critic.parameters())
+            + list(self.channel.parameters())
         )
         self.optim = torch.optim.Adam(
             self._trainable, lr=config.lr, eps=config.adam_eps
@@ -58,7 +64,8 @@ class MAPPOTrainer(nn.Module):
         self, goal: torch.Tensor, listener_pos: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         z = self.speaker(goal)
-        dist = self.listener(torch.cat([listener_pos, z], dim=-1))
+        z_hat, _ = self.channel(z)
+        dist = self.listener(torch.cat([listener_pos, z_hat], dim=-1))
         action = dist.sample()
         log_prob = dist.log_prob(action)
         state = torch.cat([listener_pos, goal], dim=-1)
@@ -82,9 +89,11 @@ class MAPPOTrainer(nn.Module):
 
         for _ in range(self.config.update_epochs):
             for mb in buffer.minibatches(self.config.num_minibatches):
-                # Fresh forward — speaker weights change across minibatches.
+                # Fresh forward — speaker weights change across minibatches;
+                # channel dither is resampled each pass (unbiased per Thm A.1 / Schuchman).
                 z_new = self.speaker(mb["goals"])
-                dist = self.listener(torch.cat([mb["listener_pos"], z_new], dim=-1))
+                z_hat, _ = self.channel(z_new)
+                dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
                 new_logp = dist.log_prob(mb["actions"])
                 entropy = dist.entropy()
 
@@ -110,7 +119,14 @@ class MAPPOTrainer(nn.Module):
                 new_value = self.critic(state_mb)  # (mb, 1)
                 critic_loss = 0.5 * (new_value - returns_norm).pow(2).mean()
 
+                # Communication cost: always compute for logging; only add to
+                # the loss when lambda_comms > 0 (IdentityChannel returns zeros anyway).
+                comms_per_elem = self.channel.comms_loss(z_new)  # (mb, z_dim)
+                comms_mean = comms_per_elem.mean()
+
                 total_loss = actor_loss + critic_loss
+                if self.config.lambda_comms > 0.0:
+                    total_loss = total_loss + self.config.lambda_comms * comms_mean
 
                 self.optim.zero_grad(set_to_none=True)
                 total_loss.backward()
@@ -120,11 +136,16 @@ class MAPPOTrainer(nn.Module):
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
                     clip_frac = ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
+                    bits_per_msg = comms_per_elem.sum(dim=-1).mean().item()
+                    z_norm = z_new.norm(dim=-1).mean().item()
 
                 metrics["pg_loss"].append(pg_loss.item())
                 metrics["value_loss"].append(critic_loss.item())
                 metrics["entropy"].append(entropy_mean.item())
                 metrics["approx_kl"].append(approx_kl)
                 metrics["clip_frac"].append(clip_frac)
+                metrics["comms_loss"].append(comms_mean.item())
+                metrics["bits_per_msg"].append(bits_per_msg)
+                metrics["z_norm"].append(z_norm)
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}
