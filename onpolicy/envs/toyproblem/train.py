@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import time
+from collections import deque
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from onpolicy.envs.toyproblem.buffer import RolloutBuffer
+from onpolicy.envs.toyproblem.CommunicatingGoal_vec_env import CommunicatingGoalVecEnv
+from onpolicy.envs.toyproblem.trainer import MAPPOConfig, MAPPOTrainer
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--n_envs", type=int, default=16)
+    p.add_argument("--n_steps", type=int, default=256)
+    p.add_argument("--total_timesteps", type=int, default=1_000_000)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--gae_lambda", type=float, default=0.95)
+    p.add_argument("--clip_eps", type=float, default=0.2)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--update_epochs", type=int, default=10)
+    p.add_argument("--num_minibatches", type=int, default=4)
+    p.add_argument("--entropy_coef", type=float, default=0.03)
+    p.add_argument("--max_grad_norm", type=float, default=0.5)
+    p.add_argument("--z_dim", type=int, default=3)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--log_dir", type=str, default="runs/toyproblem")
+    p.add_argument("--log_every", type=int, default=10)
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    device = torch.device(args.device)
+
+    env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
+    env.seed(args.seed)
+
+    config = MAPPOConfig(
+        z_dim=args.z_dim,
+        lr=args.lr,
+        clip_eps=args.clip_eps,
+        entropy_coef=args.entropy_coef,
+        max_grad_norm=args.max_grad_norm,
+        update_epochs=args.update_epochs,
+        num_minibatches=args.num_minibatches,
+    )
+    trainer = MAPPOTrainer(config, device=device)
+    buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
+
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = log_dir / "metrics.csv"
+    csv_file = open(csv_path, "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow([
+        "update", "timestep", "mean_reward", "success_rate",
+        "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac", "sps",
+    ])
+
+    n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
+
+    obs = env.reset()  # [goal (N,2), lp (N,2)] numpy float32
+    recent_rewards: deque[float] = deque(maxlen=200)
+    recent_successes: deque[int] = deque(maxlen=200)
+
+    start_time = time.time()
+    for update in range(n_updates):
+        buffer.reset()
+
+        for _ in range(args.n_steps):
+            goal_np, lp_np = obs
+            goal = torch.from_numpy(goal_np).to(device)
+            lp = torch.from_numpy(lp_np).to(device)
+
+            action, log_prob, value = trainer.act_and_value(goal, lp)
+
+            next_obs, reward, done, info = env.step(action.cpu().numpy())
+            reward_shared = reward[:, 0, 0]  # (N,) float32 — both agents share
+            done_shared = done[:, 0]  # (N,) bool
+
+            buffer.insert(
+                goal,
+                lp,
+                action,
+                log_prob,
+                value,
+                torch.from_numpy(reward_shared).to(device),
+                torch.from_numpy(done_shared.astype(np.float32)).to(device),
+            )
+
+            if done_shared.any():
+                idx = np.nonzero(done_shared)[0]
+                recent_rewards.extend(info["final_episode_reward"][idx].tolist())
+                recent_successes.extend(info["success"][idx].tolist())
+
+            obs = next_obs
+
+        goal_np, lp_np = obs
+        goal = torch.from_numpy(goal_np).to(device)
+        lp = torch.from_numpy(lp_np).to(device)
+        last_value = trainer.get_value(goal, lp)  # (N, 1) normalized
+
+        buffer.compute_returns_and_advantages(
+            last_value, trainer.value_norm, args.gamma, args.gae_lambda
+        )
+
+        metrics = trainer.update(buffer)
+
+        timestep = (update + 1) * args.n_envs * args.n_steps
+        mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+        success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
+        sps = timestep / (time.time() - start_time)
+
+        csv_writer.writerow([
+            update, timestep, mean_reward, success_rate,
+            metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
+            metrics["approx_kl"], metrics["clip_frac"], sps,
+        ])
+        csv_file.flush()
+
+        if update % args.log_every == 0 or update == n_updates - 1:
+            print(
+                f"[{update:4d}/{n_updates}] t={timestep:>8d} "
+                f"reward={mean_reward:+.3f} success={success_rate:.2f} "
+                f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
+                f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
+                f"clip={metrics['clip_frac']:.2f} sps={sps:.0f}"
+            )
+
+    csv_file.close()
+    print(f"Done. Logs at {csv_path}")
+
+
+if __name__ == "__main__":
+    main()
