@@ -23,3 +23,5 @@ api
 logs
 .nfs*
 *.so
+runs
+.claude

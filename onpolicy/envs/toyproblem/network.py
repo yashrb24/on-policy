@@ -18,7 +18,7 @@ def layer_init(
 
 
 class SpeakerNetwork(nn.Module):
-    def __init__(self, obs_dim: int, z_dim: int, hidden: int = 16) -> None:
+    def __init__(self, obs_dim: int, z_dim: int, hidden: int = 32) -> None:
         super().__init__()
         self.network = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden)),
@@ -31,7 +31,7 @@ class SpeakerNetwork(nn.Module):
 
 
 class ListenerActor(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, hidden: int = 16) -> None:
+    def __init__(self, obs_dim: int, action_dim: int, hidden: int = 32) -> None:
         super().__init__()
         self.network = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden)),
