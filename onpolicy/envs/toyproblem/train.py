@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd"])
     p.add_argument("--delta", type=float, default=1.0)
     p.add_argument("--lambda_comms", type=float, default=0.0)
+    p.add_argument("--use_entropic_prior", action="store_true")
+    p.add_argument("--gmm_structure", type=str, default="joint",
+                   choices=["joint", "independent"])
+    p.add_argument("--num_gmm_components", type=int, default=8)
+    p.add_argument("--gmm_init_spread", type=float, default=1.0)
+    p.add_argument("--gmm_lr", type=float, default=3e-4)
+    p.add_argument("--beta_target", type=float, default=1e-2)
+    p.add_argument("--beta_warmup", type=int, default=100_000)
+    p.add_argument("--beta_anneal", type=int, default=300_000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--log_dir", type=str, default="runs/toyproblem")
@@ -77,6 +86,14 @@ def main() -> None:
         channel=args.channel,
         delta=args.delta,
         lambda_comms=args.lambda_comms,
+        use_entropic_prior=args.use_entropic_prior,
+        gmm_structure=args.gmm_structure,
+        num_gmm_components=args.num_gmm_components,
+        gmm_init_spread=args.gmm_init_spread,
+        gmm_lr=args.gmm_lr,
+        beta_target=args.beta_target,
+        beta_warmup=args.beta_warmup,
+        beta_anneal=args.beta_anneal,
     )
     trainer = MAPPOTrainer(config, device=device)
     buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
@@ -90,6 +107,7 @@ def main() -> None:
         "update", "timestep", "mean_reward", "success_rate",
         "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
         "comms_loss", "bits_per_msg", "z_norm", "sps",
+        "prior_nll", "gmm_entropy", "beta",
     ])
 
     n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
@@ -139,9 +157,9 @@ def main() -> None:
             last_value, trainer.value_norm, args.gamma, args.gae_lambda
         )
 
-        metrics = trainer.update(buffer)
-
         timestep = (update + 1) * args.n_envs * args.n_steps
+        metrics = trainer.update(buffer, timestep=timestep)
+
         mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
         success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
         sps = timestep / (time.time() - start_time)
@@ -151,6 +169,8 @@ def main() -> None:
             metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
             metrics["approx_kl"], metrics["clip_frac"],
             metrics["comms_loss"], metrics["bits_per_msg"], metrics["z_norm"], sps,
+            metrics.get("prior_nll", 0.0), metrics.get("gmm_entropy", 0.0),
+            metrics.get("beta", 0.0),
         ])
         csv_file.flush()
 
@@ -165,6 +185,35 @@ def main() -> None:
             )
 
     csv_file.close()
+
+    # Post-training per-goal evaluation: one speaker pass per goal, no sampling.
+    # Writes: goal_x, goal_y, goal_prob, z_norm, bits_channel (sd/nsd only),
+    #         bits_prior (entropic only; = -log2 p(z) under GMM).
+    goals_np = env.goals.astype(np.float32)
+    probs_np = env.goal_probs.astype(np.float32)
+    goals_t = torch.from_numpy(goals_np).to(device)
+    with torch.no_grad():
+        z_eval = trainer.speaker(goals_t)                          # (G, z_dim)
+        bits_channel = trainer.channel.comms_loss(z_eval).sum(-1)  # (G,)
+        z_norm_g = z_eval.norm(dim=-1)                             # (G,)
+        bits_prior = torch.zeros(len(goals_np), device=device)
+        if trainer.gmm_prior is not None:
+            import math as _math
+            bits_prior = -trainer.gmm_prior.log_prob(z_eval) / _math.log(2)
+
+    per_goal_path = log_dir / "per_goal_bits.csv"
+    with open(per_goal_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["goal_idx", "goal_x", "goal_y", "goal_prob",
+                    "z_norm", "bits_channel", "bits_prior"])
+        for i in range(len(goals_np)):
+            w.writerow([
+                i, int(goals_np[i, 0]), int(goals_np[i, 1]),
+                float(probs_np[i]),
+                float(z_norm_g[i].item()),
+                float(bits_channel[i].item()),
+                float(bits_prior[i].item()),
+            ])
 
     ckpt_path = log_dir / "final.pt"
     torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)

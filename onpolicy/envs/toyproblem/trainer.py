@@ -9,6 +9,7 @@ from torch import nn
 
 from onpolicy.envs.toyproblem.buffer import RolloutBuffer
 from onpolicy.envs.toyproblem.channels import build_channel
+from onpolicy.envs.toyproblem.entropic import GMMPrior, beta_schedule
 from onpolicy.envs.toyproblem.network import Critic, ListenerActor, SpeakerNetwork
 from onpolicy.utils.valuenorm import ValueNorm
 
@@ -26,6 +27,15 @@ class MAPPOConfig:
     channel: str = "none"
     delta: float = 1.0
     lambda_comms: float = 0.0
+    # --- Entropic GMM Prior ---
+    use_entropic_prior: bool = False
+    gmm_structure: str = "joint"        # "joint" or "independent"
+    num_gmm_components: int = 8
+    gmm_init_spread: float = 1.0
+    gmm_lr: float = 3e-4
+    beta_target: float = 1e-2
+    beta_warmup: int = 100_000          # env timesteps before prior kicks in
+    beta_anneal: int = 300_000          # env timesteps over which beta ramps
 
 
 class MAPPOTrainer(nn.Module):
@@ -59,6 +69,22 @@ class MAPPOTrainer(nn.Module):
             self._trainable, lr=config.lr, eps=config.adam_eps
         )
 
+        # --- Entropic GMM Prior & Independent Optimizer ---
+        self.gmm_prior: GMMPrior | None = None
+        self.gmm_optim: torch.optim.Optimizer | None = None
+        if config.use_entropic_prior:
+            self.gmm_prior = GMMPrior(
+                num_components=config.num_gmm_components,
+                signal_dim=config.z_dim,
+                init_spread=config.gmm_init_spread,
+                structure=config.gmm_structure,
+            ).to(device)
+            self.gmm_optim = torch.optim.Adam(
+                self.gmm_prior.parameters(),
+                lr=config.gmm_lr,
+                eps=config.adam_eps,
+            )
+
     @torch.no_grad()
     def act_and_value(
         self, goal: torch.Tensor, listener_pos: torch.Tensor
@@ -79,11 +105,21 @@ class MAPPOTrainer(nn.Module):
         state = torch.cat([listener_pos, goal], dim=-1)
         return self.critic(state)
 
-    def update(self, buffer: RolloutBuffer) -> dict[str, float]:
+    def update(self, buffer: RolloutBuffer, timestep: int = 0) -> dict[str, float]:
         # Per-batch advantage normalization (computed once, applied to all mbs).
         adv_flat = buffer.advantages.flatten()
         adv_mean = adv_flat.mean()
         adv_std = adv_flat.std()
+
+        # Beta for the entropic prior: constant across this update call.
+        beta = 0.0
+        if self.gmm_prior is not None:
+            beta = beta_schedule(
+                timestep,
+                self.config.beta_warmup,
+                self.config.beta_anneal,
+                self.config.beta_target,
+            )
 
         metrics: dict[str, list[float]] = defaultdict(list)
 
@@ -128,10 +164,36 @@ class MAPPOTrainer(nn.Module):
                 if self.config.lambda_comms > 0.0:
                     total_loss = total_loss + self.config.lambda_comms * comms_mean
 
+                # Entropic prior contribution. Speaker path: GMM params frozen
+                # (grad flows only through z → speaker). GMM path: z detached
+                # (grad flows only to GMM). Both summed into one backward.
+                prior_nll_val = 0.0
+                gmm_entropy_val = 0.0
+                if self.gmm_prior is not None:
+                    for p in self.gmm_prior.parameters():
+                        p.requires_grad_(False)
+                    prior_for_speaker = -self.gmm_prior.log_prob(z_new).mean()
+                    for p in self.gmm_prior.parameters():
+                        p.requires_grad_(True)
+
+                    gmm_mle = -self.gmm_prior.log_prob(z_new.detach()).mean()
+
+                    total_loss = total_loss + beta * prior_for_speaker + gmm_mle
+                    prior_nll_val = prior_for_speaker.item()
+                    gmm_entropy_val = self.gmm_prior.weights_entropy().item()
+
                 self.optim.zero_grad(set_to_none=True)
+                if self.gmm_optim is not None:
+                    self.gmm_optim.zero_grad(set_to_none=True)
                 total_loss.backward()
                 nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
+                if self.gmm_optim is not None:
+                    nn.utils.clip_grad_norm_(
+                        self.gmm_prior.parameters(), self.config.max_grad_norm
+                    )
                 self.optim.step()
+                if self.gmm_optim is not None:
+                    self.gmm_optim.step()
 
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
@@ -147,5 +209,8 @@ class MAPPOTrainer(nn.Module):
                 metrics["comms_loss"].append(comms_mean.item())
                 metrics["bits_per_msg"].append(bits_per_msg)
                 metrics["z_norm"].append(z_norm)
+                metrics["prior_nll"].append(prior_nll_val)
+                metrics["gmm_entropy"].append(gmm_entropy_val)
+                metrics["beta"].append(beta)
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}
