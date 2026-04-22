@@ -39,8 +39,10 @@ class CommunicatingGoalVecEnv(gym.Env):
 
         self.rng = np.random.RandomState(None)
 
-        self.goals = _DEFAULT_GOALS.copy()
-        self.goal_probs = _DEFAULT_GOAL_PROBS / _DEFAULT_GOAL_PROBS.sum()
+        goals_override = getattr(args, "_parsed_goals", None)
+        probs_override = getattr(args, "_parsed_goal_probs", None)
+        self.goals = goals_override.copy() if goals_override is not None else _DEFAULT_GOALS.copy()
+        self.goal_probs = (probs_override / probs_override.sum()) if probs_override is not None else (_DEFAULT_GOAL_PROBS / _DEFAULT_GOAL_PROBS.sum())
 
         single_box = spaces.Box(
             low=0.0, high=float(self.grid_size - 1),

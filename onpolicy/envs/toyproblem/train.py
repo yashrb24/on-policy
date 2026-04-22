@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import time
 from collections import deque
 from pathlib import Path
@@ -35,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--log_dir", type=str, default="runs/toyproblem")
     p.add_argument("--log_every", type=int, default=10)
+    p.add_argument("--grid_size", type=int, default=None)
+    p.add_argument("--max_steps", type=int, default=None)
+    p.add_argument("--goals", type=str, default=None,
+                   help="JSON array of goal coordinates, e.g. '[[0,0],[7,7]]'")
+    p.add_argument("--goal_probs", type=str, default=None,
+                   help="JSON array of probabilities, or 'zipf' for 1/k distribution")
     return p.parse_args()
 
 
@@ -46,7 +53,17 @@ def main() -> None:
 
     device = torch.device(args.device)
 
-    env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
+    if args.goals is not None:
+        args._parsed_goals = np.array(json.loads(args.goals), dtype=int)
+    if args.goal_probs is not None:
+        if args.goal_probs == "zipf":
+            n = len(args._parsed_goals)
+            p = 1.0 / np.arange(1, n + 1)
+            args._parsed_goal_probs = p / p.sum()
+        else:
+            args._parsed_goal_probs = np.array(json.loads(args.goal_probs), dtype=np.float64)
+
+    env = CommunicatingGoalVecEnv(num_envs=args.n_envs, args=args)
     env.seed(args.seed)
 
     config = MAPPOConfig(
