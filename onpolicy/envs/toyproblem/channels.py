@@ -58,7 +58,7 @@ class DDCL_SD(nn.Module):
 
     def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
         """Per-element Jensen upper bound on expected bit length."""
-        return torch.log2(2 * z.abs() / self.delta + 1)
+        return torch.log2(z.abs() / self.delta + 1)
 
 
 class DDCL_NSD(nn.Module):
@@ -91,7 +91,7 @@ class DDCL_NSD(nn.Module):
 
     def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
         """Same Jensen bound as SD — derivation carries over under NSD."""
-        return torch.log2(2 * z.abs() / self.delta + 1)
+        return torch.log2(z.abs() / self.delta + 1)
 
 
 def build_channel(name: str, delta: float) -> nn.Module:
