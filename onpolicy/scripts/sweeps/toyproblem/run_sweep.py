@@ -77,12 +77,22 @@ def _load_grid(config_path: str) -> list[dict]:
 
 
 def _run_key(hparams: dict, seed: int) -> str:
-    """Generate a stable string key for a (hparams, seed) combination."""
+    """Generate a stable string key for a (hparams, seed) combination.
+
+    Only include parameters that actually vary across the sweep grid.
+    Fixed hyper-parameters (PPO knobs, network size, etc.) are excluded so
+    the key stays short and — critically — unique.  Including them in the key
+    caused 80-char truncation to alias many distinct (lambda_comms, z_dim)
+    combinations to the same directory name, silently skipping most runs.
+    """
+    _FIXED = {
+        "n_envs", "n_steps", "update_epochs", "max_grad_norm", "gamma",
+        "total_timesteps", "clip_eps", "entropy_coef", "gae_lambda",
+        "hidden_size", "lr", "num_minibatches", "ste_clip",
+    }
     items = sorted(hparams.items())
-    parts = "_".join(f"{k}={v}" for k, v in items if k not in (
-        "n_envs", "n_steps", "update_epochs", "max_grad_norm", "gamma", "total_timesteps"
-    ))
-    return f"seed{seed}_{parts}"[:120]  # truncate for filesystem safety
+    parts = "_".join(f"{k}={v}" for k, v in items if k not in _FIXED)
+    return f"seed{seed}_{parts}"
 
 
 def _build_command(hparams: dict, seed: int, log_dir: str, exp_name: str) -> list[str]:
