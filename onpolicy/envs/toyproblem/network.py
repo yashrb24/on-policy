@@ -55,3 +55,46 @@ class Critic(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
+
+
+class EntropyModelFactored(nn.Module):
+    """Per-dimension Discretised Logistic Mixture prior.
+
+    q_φ(m) = ∏_k q_φ_k(m_k)
+    q_φ_k(m_k) = Σ_c π_c · [σ((m_k+0.5−μ_c)/s_c) − σ((m_k−0.5−μ_c)/s_c)]
+
+    Works for both discrete m.float() (forward loss: trains q_φ) and continuous
+    z/δ (backward loss: grads flow to speaker via Ballé relaxation).
+    """
+
+    def __init__(self, z_dim: int, K: int = 5) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # (z_dim, K) — uniform mixture, centred, wide scales
+        self.log_pi = nn.Parameter(torch.zeros(z_dim, K))
+        self.mu = nn.Parameter(torch.zeros(z_dim, K))
+        self.log_s = nn.Parameter(torch.ones(z_dim, K))  # s = e ≈ 2.72 at init
+
+    @staticmethod
+    def _dlm_log_prob(
+        x: torch.Tensor,       # (..., z_dim)
+        log_pi: torch.Tensor,  # (z_dim, K)  or  (..., z_dim, K)
+        mu: torch.Tensor,      # same shape as log_pi
+        s: torch.Tensor,       # same shape as log_pi (positive)
+    ) -> torch.Tensor:         # (..., z_dim)
+        """DLM log-probability per dimension."""
+        x_e = x.unsqueeze(-1)                                         # (..., z_dim, 1)
+        upper = torch.sigmoid((x_e + 0.5 - mu) / s)                  # (..., z_dim, K)
+        lower = torch.sigmoid((x_e - 0.5 - mu) / s)                  # (..., z_dim, K)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()  # (..., z_dim, K)
+        return torch.logsumexp(log_p_k, dim=-1)                       # (..., z_dim)
+
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
+        """Log q_φ(x) per dimension. x: (..., z_dim)."""
+        return self._dlm_log_prob(x, self.log_pi, self.mu, self.log_s.exp())
+
+    def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
+        """Negative log-likelihood in bits per element: −log₂ q_φ(x)."""
+        return -self.log_prob(x) / math.log(2)
