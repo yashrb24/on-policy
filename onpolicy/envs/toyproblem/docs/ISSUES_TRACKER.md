@@ -271,7 +271,7 @@ These are upstream bugs in the shared `on-policy` repository. They were found du
   - `train.py`: Added `"true_bits_per_msg"` to `CSV_HEADER` and the writer row; updated console output to show both `bits_surr` and `bits_true`.
   - `analysis/load_runs.py`: Added `"true_bits_per_msg"` to `final_metrics` `key_cols`.
   - `analysis/report_baseline.py`: Added separate training-curve plot for `true_bits_per_msg`; added second rate-distortion plot using `true_bits_per_msg` (deployment perspective); legacy `rate_distortion.png` now copies from `rate_distortion_surrogate.png`.
-  - Deleted the 90 corrupted Stage A runs (`runs/sweep_stage_a/`) so they re-run with correct logging.
+  - Deleted the 90 corrupted Stage A runs (`runs/toyproblem/sweep_stage_a/`) so they re-run with correct logging.
 - **Status:** ✅ RESOLVED (2026-04-23)
 - **Reproducibility impact:** YES — all Stage A runs prior to this fix have `bits_per_msg = 0` for `none` channel and are missing `true_bits_per_msg`. Those 90 runs were deleted and must be re-run. New runs log both columns correctly.
 
@@ -359,7 +359,7 @@ This checklist tracks what a cold reader needs to fully reproduce the project fr
 | Baseline channels implemented | ✅ DONE | Phase 2 Session 3: additive_uniform, gaussian, ste4/8/16 in channels.py |
 | Env + MAPPO validation scripts | ✅ DONE | Phase 2 Session 3: experiments/validate_environment.py, validate_mappo.py |
 | Channel comparison script | ✅ DONE | Phase 2 Session 3: experiments/run_channel_comparison.py |
-| Channel comparison completed | ✅ DONE | 2026-04-23: 40 runs (8 channels × 5 seeds × 1M steps); results in `docs/results/channel_comparison/` |
+| Channel comparison completed | ✅ DONE | 2026-04-23: 40 runs (8 channels × 5 seeds × 1M steps); results in `results/toyproblem/channel_comparison/` |
 | H(G) and per-channel bit formalization | ✅ DONE | 2026-04-23: `channels.py` H_GOAL_BITS, GOAL_OPTIMAL_BITS, true_bits_from_m, transmission_bits_per_elem; MATH.md §10 |
 | Bit-calculation MC validation | ✅ DONE | 2026-04-23: all channels validated; surrogate properties documented in MATH.md §10.2 |
 | `true_bits_per_msg` logging fixed | ✅ DONE | 2026-04-23: CODE-004; train.py, load_runs.py, report_baseline.py all updated |
@@ -367,7 +367,7 @@ This checklist tracks what a cold reader needs to fully reproduce the project fr
 | Stage A config includes additive_uniform | ✅ DONE | 2026-04-24: CODE-007; additive_uniform added to sweep_stage_a.yaml |
 | `none` channel redundancy fixed in run_sweep.py | ✅ DONE | 2026-04-24: CODE-008; auto-deduplication logic added |
 | Jensen gap uncertainty bands in plots | ✅ DONE | 2026-04-24: plot_per_goal_bits enhanced; paper_figures.py created |
-| Run logs moved to toyproblem-local directory | ✅ DONE | 2026-04-24: runs/ directory created inside toyproblem; PLAN.md/CONTEXT.md updated |
+| Canonical data layout established | ✅ DONE | 2026-04-24: `runs/toyproblem/` and `results/toyproblem/` at repo root; stale top-level dirs deleted; all script defaults updated |
 | Research paper figure scripts created | ✅ DONE | 2026-04-24: analysis/paper_figures.py — 10 figures with hypothesis/analysis/conclusion |
 | run_sweep key collision fixed + 95 runs recovered | ✅ DONE | 2026-04-24: CODE-009; _run_key now uses only varying params; 95 existing runs renamed from checkpoint args |
 | Stage A sweep re-launched (post CODE-009 fix) | ✅ DONE | 2026-04-24: sweep running; ~98 of ~2175 done as of session end |

@@ -96,7 +96,7 @@ Verify **mathematical principles** via Monte-Carlo unit tests (≥10⁵ samples 
 - Baseline channels in `channels.py`: `additive_uniform`, `gaussian`, `ste4/8/16`
 - `experiments/`: `validate_environment.py` (5/5 pass), `validate_mappo.py` (6/6 pass), `run_channel_comparison.py`
 - `tests/test_channels.py`: 28 new tests for baseline channels (79 total, all passing)
-- ~~Run channel comparison~~ ✅ DONE — 40 runs (8 channels × 5 seeds); report + 12 paper figures in `docs/results/channel_comparison/`
+- ~~Run channel comparison~~ ✅ DONE — 40 runs (8 channels × 5 seeds); report + 12 paper figures in `results/toyproblem/channel_comparison/`
 - Stage A sweep running — see `docs/README.md §5` for monitor/resume commands
 
 **What remains after Stage A completes:**
@@ -164,14 +164,14 @@ A sweep is **done** when ALL hold:
 | `stats.py` | Bootstrap CI, paired permutation, Wilcoxon, IQM+stratified bootstrap, Pareto test, gradient-variance diagnostic |
 | `plots.py` | Rate–distortion frontier, training curves with seed-bands, per-goal bit allocation |
 | `sweep_convergence.py` | Automated convergence gate |
-| `report_baseline.py` | Emit `docs/results/baseline.md` |
+| `report_baseline.py` | Emit `results/toyproblem/baseline.md` |
 
 All statistical methods explained in plain English in `docs/STATS.md`.
 
 ### 2.5 Deliverable
 
 - `configs/baseline_best.yaml` frozen.
-- `docs/results/baseline.md` with tables + plots + convergence decision.
+- `results/toyproblem/baseline.md` with tables + plots + convergence decision.
 - `docs/STATS.md`.
 
 ### 2.6 Research Paper Figures (`analysis/paper_figures.py`)
@@ -211,17 +211,17 @@ Combined: σ_total(i) = sqrt(σ_RL² + σ_Jensen²), shown as shaded envelope.
 from onpolicy.envs.toyproblem.analysis.load_runs import load_sweep, final_metrics, seed_aggregate
 from onpolicy.envs.toyproblem.analysis.paper_figures import generate_all_paper_figures
 
-df = load_sweep("onpolicy/envs/toyproblem/runs/sweep_stage_a")
+df = load_sweep("runs/toyproblem/sweep_stage_a")
 summary = final_metrics(df)
 agg = seed_aggregate(summary, group_cols=["channel","lambda_comms","delta","z_dim"])
-generate_all_paper_figures(df, summary, agg, out_dir="onpolicy/envs/toyproblem/docs/results/paper_figures")
+generate_all_paper_figures(df, summary, agg, out_dir="results/toyproblem/sweep_stage_a/figures")
 ```
 
 ---
 
 ## Phase 3 — Roll out the 4 pillars (order: P2 → P1 → P4 → P3)
 
-**Recipe for each pillar:** Derive loss → Implement (toggleable, baseline bit-identical when off) → Unit tests → Sanity run → Pillar-specific sweep (§2.3 gate) → `configs/pillarN_best.yaml` → `docs/results/pillarN.md`.
+**Recipe for each pillar:** Derive loss → Implement (toggleable, baseline bit-identical when off) → Unit tests → Sanity run → Pillar-specific sweep (§2.3 gate) → `configs/pillarN_best.yaml` → `results/toyproblem/pillarN/baseline.md`.
 
 ### 3.1 P2 — Entropy-model communication cost
 
@@ -316,7 +316,7 @@ generate_all_paper_figures(df, summary, agg, out_dir="onpolicy/envs/toyproblem/d
 | `configs/pillar{1-4}_best.yaml` | 3 | 🔲 TODO | Per-pillar best configs |
 | `configs/unleashed.yaml` | 4 | 🔲 TODO | All-pillars combined config |
 | `scaling/` | 4.2 | 🔲 TODO | Multi-agent toy-problem variants |
-| `docs/results/` | 2–4 | 🔶 PARTIAL | `channel_comparison/` complete (40 runs + 12 paper figures); `sweep_stage_a/` pending full sweep |
+| `results/toyproblem/` | 2–4 | 🔶 PARTIAL | `channel_comparison/` complete (40 runs + 12 paper figures); `sweep_stage_a/` pending full sweep |
 | `docs/STATS.md` | 2 | ✅ DONE | Plain-English guide: 8 statistical methods |
 | `docs/RESULTS_INDEX.md` | 5 | 🔲 TODO | Claim → result file → stat test pointers |
 | `onpolicy/scripts/sweeps/toyproblem/` | 2 | ✅ DONE | `sweep_stage_a.yaml`, `sweep_stage_b.yaml`, `sweep_wrapper.py`, `run_sweep.py` |

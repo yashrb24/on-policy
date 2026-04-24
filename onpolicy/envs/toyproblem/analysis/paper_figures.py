@@ -15,12 +15,12 @@ Typical usage after a Stage A/B/C sweep:
     from onpolicy.envs.toyproblem.analysis.paper_figures import *
     from onpolicy.envs.toyproblem.channels import H_GOAL_BITS, GOAL_OPTIMAL_BITS, _GOAL_PROBS
 
-    df = load_sweep("onpolicy/envs/toyproblem/runs/sweep_stage_a")
+    df = load_sweep("runs/toyproblem/sweep_stage_a")
     summary = final_metrics(df)
     agg = seed_aggregate(summary, group_cols=["channel", "lambda_comms", "delta", "z_dim"])
 
-    plot_paper_rate_distortion(agg, save_path="figs/fig_rate_distortion.pdf")
-    plot_paper_per_goal_allocation(df, save_path="figs/fig_per_goal_bits.pdf")
+    plot_paper_rate_distortion(agg, save_path="results/toyproblem/sweep_stage_a/figures/fig_rate_distortion.pdf")
+    plot_paper_per_goal_allocation(df, save_path="results/toyproblem/sweep_stage_a/figures/fig_per_goal_bits.pdf")
     ...
 
 Dependency: matplotlib (required), scipy (optional, for Wilcoxon).
@@ -976,7 +976,7 @@ def generate_all_paper_figures(
     df: pd.DataFrame,
     summary: pd.DataFrame,
     agg: pd.DataFrame,
-    out_dir: str | Path = "docs/results/channel_comparison/figures",
+    out_dir: str | Path = "results/toyproblem/channel_comparison/figures",
 ) -> None:
     """Generate all paper figures from sweep data and save to *out_dir*.
 
@@ -985,8 +985,8 @@ def generate_all_paper_figures(
     df      : full tidy DataFrame (all seeds, one row per update)
     summary : per-seed final-metrics DataFrame from load_runs.final_metrics
     agg     : per-config aggregated DataFrame from load_runs.seed_aggregate
-    out_dir : directory to write PNG files — should match the sweep's figures/ dir,
-              e.g. "docs/results/sweep_stage_a/figures"
+    out_dir : directory to write PNG files — should be the sweep's figures/ dir,
+              e.g. "results/toyproblem/sweep_stage_a/figures"
 
     Usage
     -----
@@ -995,10 +995,10 @@ def generate_all_paper_figures(
     )
     from onpolicy.envs.toyproblem.analysis.paper_figures import generate_all_paper_figures
 
-    df = load_sweep("onpolicy/envs/toyproblem/runs/sweep_stage_a")
+    df = load_sweep("runs/toyproblem/sweep_stage_a")
     summary = final_metrics(df)
     agg = seed_aggregate(summary, group_cols=["channel","lambda_comms","delta","z_dim"])
-    generate_all_paper_figures(df, summary, agg, out_dir="docs/results/sweep_stage_a/figures")
+    generate_all_paper_figures(df, summary, agg, out_dir="results/toyproblem/sweep_stage_a/figures")
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

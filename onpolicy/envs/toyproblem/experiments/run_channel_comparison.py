@@ -16,7 +16,7 @@ Channels compared
   ste16            : Fixed-rate STE 16-bit quantizer
 
 For each channel × seed, runs train.py and saves results to:
-    runs/channel_comparison/<channel>_lam<lambda>_d<delta>/<seed>/
+    runs/toyproblem/channel_comparison/<channel>_lam<lambda>_d<delta>/<seed>/
 
 Usage
 -----
@@ -33,8 +33,8 @@ Full comparison (5 seeds, 1M steps):
 After runs complete, generate the report:
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
         python -m onpolicy.envs.toyproblem.analysis.report_baseline \
-        --sweep_dir runs/channel_comparison \
-        --out_dir docs/results/channel_comparison
+        --sweep_dir runs/toyproblem/channel_comparison \
+        --out_dir results/toyproblem/channel_comparison
 """
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def main() -> None:
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4],
                    help="Seeds to run for each channel.")
     p.add_argument("--total_timesteps", type=int, default=1_000_000)
-    p.add_argument("--log_dir", type=str, default="runs/channel_comparison",
+    p.add_argument("--log_dir", type=str, default="runs/toyproblem/channel_comparison",
                    help="Root directory for run outputs.")
     p.add_argument("--hidden_size", type=int, default=64)
     p.add_argument("--z_dim", type=int, default=3)
@@ -186,7 +186,7 @@ def main() -> None:
         print("To generate comparison report:")
         print(
             f"  python -m onpolicy.envs.toyproblem.analysis.report_baseline "
-            f"--sweep_dir {args.log_dir} --out_dir docs/results/channel_comparison"
+            f"--sweep_dir {args.log_dir} --out_dir results/toyproblem/channel_comparison"
         )
 
 

@@ -15,7 +15,7 @@ KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
-    --seeds 0 1 2 3 4 --log_dir runs/sweep_stage_a
+    --seeds 0 1 2 3 4 --log_dir runs/toyproblem/sweep_stage_a
 
 Note: grid sweeps can be large (Stage A has 3×8×6×3 = 432 configs × 5 seeds
 = 2160 runs). On a single machine, run a random subset with --max_runs N.
@@ -108,7 +108,7 @@ def main() -> None:
     p.add_argument("--config", type=str, required=True,
                    help="Path to sweep YAML config.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    p.add_argument("--log_dir", type=str, default="runs/sweep",
+    p.add_argument("--log_dir", type=str, default="runs/toyproblem/sweep",
                    help="Root directory for run outputs.")
     p.add_argument("--max_runs", type=int, default=None,
                    help="Maximum runs to execute (random subset of grid if exceeded).")
@@ -182,7 +182,7 @@ def main() -> None:
         print()
         print("Next: run convergence gate and report:")
         print(f"  python -m onpolicy.envs.toyproblem.analysis.report_baseline "
-              f"--sweep_dir {args.log_dir} --out_dir docs/results/sweep")
+              f"--sweep_dir {args.log_dir} --out_dir results/toyproblem/sweep")
 
 
 if __name__ == "__main__":

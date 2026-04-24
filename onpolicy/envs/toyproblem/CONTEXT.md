@@ -12,7 +12,7 @@ Every session must follow these rules — no exceptions.
 |-------|---------------|
 | Bug found or fixed | `docs/ISSUES_TRACKER.md` — add entry before fixing |
 | Code file created or changed | `PLAN.md` — mark task done; update phase status if phase completes |
-| New sweep results generated | Re-run `report_baseline.py`; replace `docs/results/<sweep>/` |
+| New sweep results generated | Re-run `report_baseline.py`; replace `results/toyproblem/<sweep>/` |
 | Experiment procedure changes | `docs/README.md §5` |
 | Mathematical finding or correction | `docs/MATH.md` |
 | Statistical method added or changed | `docs/STATS.md` |
@@ -39,17 +39,29 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 ## Current State
 
 **Phase:** 2 — Hyperparameter sweeps  
-**Running:** Stage A sweep — ~98/2175 runs done as of 2026-04-24 (nohup-detached)  
-**Immediate next action:** Wait for Stage A to finish, then run `report_baseline.py` + `generate_all_paper_figures`. See `PLAN.md §Phase 2 — What remains after Stage A`.
+**Running:** Stage A sweep — writing to `onpolicy/envs/toyproblem/runs/sweep_stage_a` (legacy path, mid-run). Do NOT move until sweep finishes.  
+**Immediate next action:** Wait for Stage A to finish → move data to canonical path → run `report_baseline.py` + `generate_all_paper_figures`.
+
+**Directory layout (canonical, from repo root):**
+- Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
+- Analysis output: `results/toyproblem/<experiment>/` (gitignored)
+- Committed docs: `onpolicy/envs/toyproblem/docs/` (no data here)
 
 **Check sweep:** `ps aux | grep run_sweep | grep -v grep`  
-**Completed runs:** `find onpolicy/envs/toyproblem/runs/sweep_stage_a -name metrics.csv | wc -l`  
-**Restart if needed:**
+**Completed runs:** `find onpolicy/envs/toyproblem/runs/sweep_stage_a -name metrics.csv | wc -l`
+
+**After sweep finishes — migrate to canonical path:**
 ```bash
-cd on-policy && nohup bash -c 'KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+mkdir -p runs/toyproblem
+mv onpolicy/envs/toyproblem/runs/sweep_stage_a runs/toyproblem/sweep_stage_a
+```
+
+**Restart if needed** (uses canonical path for new runs):
+```bash
+nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
-    --seeds 0 1 2 3 4 --log_dir onpolicy/envs/toyproblem/runs/sweep_stage_a \
+    --seeds 0 1 2 3 4 --log_dir runs/toyproblem/sweep_stage_a \
     --resume --shuffle' > /tmp/sweep_stage_a.log 2>&1 &
 ```
 
@@ -58,6 +70,8 @@ cd on-policy && nohup bash -c 'KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 9 (2026-04-24):** Unified data layout. Canonical paths: `runs/toyproblem/<exp>/` and `results/toyproblem/<exp>/` at repo root (both gitignored). Deleted stale top-level `docs/` and `runs/` (pre-consolidation artefacts). Moved `toyproblem/runs/channel_comparison` → `runs/toyproblem/channel_comparison`; `toyproblem/docs/results/channel_comparison` → `results/toyproblem/channel_comparison`. Active sweep_stage_a left in place (sweep still running). Removed `plots/` and `paper_figures/` split — all figures go to `figures/`. Updated all script defaults and docs. Committed `f2c7a6a` and follow-on.
 
 **Session 8 (2026-04-24):** Completed 7→5 file consolidation: KNOWN_ISSUES.md content migrated into ISSUES_TRACKER.md as UPSTREAM-001–004; KNOWN_ISSUES.md deleted; CODE-003 status updated. CONTEXT.md committed in new slim format. Committed `81a9c59`.
 
