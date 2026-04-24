@@ -1,0 +1,67 @@
+# DDCL Toy Problem — Baseline v0 Config
+#
+# Status: VERIFIED CORRECT (Phase 1) — not yet optimised.
+# Purpose: a logically correct starting point before Phase 2 hyperparameter sweeps.
+# All mathematical principles are verified by the Phase 1 test suite (51 passing tests).
+#
+# To train:
+#   KMP_DUPLICATE_LIB_OK=TRUE python -m onpolicy.envs.toyproblem.train \
+#     --exp_name baseline_v0 --channel sd --seed 0
+#   (repeat for seeds 1-4)
+#
+# To be replaced by configs/baseline_best.yaml after Phase 2 sweeps.
+
+# ── Experiment identity ──────────────────────────────────────────────────────
+exp_name: baseline_v0
+seed: 0                        # run with seeds {0,1,2,3,4} for statistical validity
+
+# ── Environment ──────────────────────────────────────────────────────────────
+# 8×8 grid, 50 steps max, 6 Zipf goals, step penalty -0.01, success reward +1.0
+# (env parameters are currently hard-coded; these are for documentation)
+grid_size: 8
+max_steps: 50
+
+# ── Communication channel ────────────────────────────────────────────────────
+channel: sd                    # subtractive dithering (DDCL_SD)
+z_dim: 3                       # message dimension (paper uses 1; swept in Phase 2)
+delta: 10.0                    # quantisation bin width δ (swept in Phase 2)
+lambda_comms: 4.0e-3           # communication loss weight λ (swept in Phase 2)
+# Note: bit-cost formula is log2(|z|/δ + 1) — see docs/MATH.md §2.3 for deviation
+
+# ── Network architecture ─────────────────────────────────────────────────────
+hidden_size: 64                # hidden units in speaker and listener MLPs
+# Critic uses fixed hidden=hidden_size (wired in trainer.py)
+
+# ── Training schedule ────────────────────────────────────────────────────────
+n_envs: 16                     # parallel environments
+n_steps: 256                   # rollout steps per update
+total_timesteps: 1_000_000     # total env steps
+
+# ── PPO hyperparameters ──────────────────────────────────────────────────────
+lr: 3.0e-4                     # Adam learning rate (swept in Phase 2)
+clip_eps: 0.2                  # PPO clip ε
+update_epochs: 10              # PPO epochs per rollout
+num_minibatches: 4             # minibatches per epoch (batch_size = n_steps*n_envs/num_mb)
+entropy_coef: 0.03             # entropy bonus coefficient (swept in Phase 2)
+max_grad_norm: 0.5             # gradient clip norm
+gamma: 0.99                    # discount factor
+gae_lambda: 0.95               # GAE λ
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log_dir: runs
+log_every: 10
+
+# ── Phase 1 verification notes ───────────────────────────────────────────────
+# All of the following are verified by the 51-test Phase 1 suite:
+#   ✅ SD channel: E[ẑ-z]≈0, Var(ẑ-z)=δ²/12, ∂ẑ/∂z=1, Corr(e,z)≈0
+#   ✅ NSD channel: E[ẑ-z]≈0, Var(ẑ-z)=δ²/4 (NOT δ²/6 — see MATH-002), Cov(e,z)≈0
+#   ✅ comms_loss = log2(|z|/δ + 1), non-negative, monotone, zero at origin
+#   ✅ lambda_comms gates comms gradient correctly
+#   ✅ comms_loss evaluated on z (not z_hat)
+#   ✅ critic has no comms path (CTDE)
+#   ✅ env determinism, auto-reset, independent slot reset, final_obs in info
+#   ✅ per-goal bit-allocation logged (bits_goal_0 … bits_goal_5 in metrics.csv)
+#
+# Known mathematical finding (MATH-002): NSD reconstruction variance is δ²/4,
+# not δ²/6 as originally stated in the proposal. Both SD and NSD are unbiased;
+# NSD has 3× more noise variance than SD (δ²/4 vs δ²/12).

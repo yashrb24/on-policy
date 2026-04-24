@@ -16,6 +16,7 @@ from onpolicy.utils.valuenorm import ValueNorm
 @dataclass
 class MAPPOConfig:
     z_dim: int = 3
+    hidden_size: int = 64
     lr: float = 3e-4
     clip_eps: float = 0.2
     entropy_coef: float = 0.03
@@ -26,6 +27,7 @@ class MAPPOConfig:
     channel: str = "none"
     delta: float = 1.0
     lambda_comms: float = 0.0
+    ste_clip: float = 10.0
 
 
 class MAPPOTrainer(nn.Module):
@@ -41,12 +43,16 @@ class MAPPOTrainer(nn.Module):
         self.config = config
         self.device = device
 
-        self.speaker = SpeakerNetwork(obs_dim=2, z_dim=config.z_dim).to(device)
-        self.listener = ListenerActor(
-            obs_dim=2 + config.z_dim, action_dim=5
+        self.speaker = SpeakerNetwork(
+            obs_dim=2, z_dim=config.z_dim, hidden=config.hidden_size
         ).to(device)
-        self.critic = Critic(state_dim=4).to(device)
-        self.channel = build_channel(config.channel, config.delta).to(device)
+        self.listener = ListenerActor(
+            obs_dim=2 + config.z_dim, action_dim=5, hidden=config.hidden_size
+        ).to(device)
+        self.critic = Critic(state_dim=4, hidden=config.hidden_size).to(device)
+        self.channel = build_channel(
+            config.channel, config.delta, ste_clip=config.ste_clip
+        ).to(device)
         self.value_norm = ValueNorm(input_shape=1, device=device)
 
         self._trainable = (
@@ -92,7 +98,7 @@ class MAPPOTrainer(nn.Module):
                 # Fresh forward — speaker weights change across minibatches;
                 # channel dither is resampled each pass (unbiased per Thm A.1 / Schuchman).
                 z_new = self.speaker(mb["goals"])
-                z_hat, _ = self.channel(z_new)
+                z_hat, ch_info = self.channel(z_new)
                 dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
                 new_logp = dist.log_prob(mb["actions"])
                 entropy = dist.entropy()
@@ -136,7 +142,14 @@ class MAPPOTrainer(nn.Module):
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
                     clip_frac = ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
+                    # Surrogate: differentiable Jensen UB used in training loss.
                     bits_per_msg = comms_per_elem.sum(dim=-1).mean().item()
+                    # True transmission cost: float32 for none, log₂(|m|+1) for
+                    # quantized channels, fixed B for STE.
+                    true_bits_per_elem = self.channel.transmission_bits_per_elem(
+                        z_new, ch_info
+                    )
+                    true_bits_per_msg = true_bits_per_elem.sum(dim=-1).mean().item()
                     z_norm = z_new.norm(dim=-1).mean().item()
 
                 metrics["pg_loss"].append(pg_loss.item())
@@ -146,6 +159,15 @@ class MAPPOTrainer(nn.Module):
                 metrics["clip_frac"].append(clip_frac)
                 metrics["comms_loss"].append(comms_mean.item())
                 metrics["bits_per_msg"].append(bits_per_msg)
+                metrics["true_bits_per_msg"].append(true_bits_per_msg)
                 metrics["z_norm"].append(z_norm)
+
+                # Per-goal bit allocation: mean bits used per goal index (0–5).
+                with torch.no_grad():
+                    bits_per_elem = comms_per_elem.sum(dim=-1)  # (mb,)
+                    for g_idx in mb["goal_ids"].unique():
+                        mask = mb["goal_ids"] == g_idx
+                        key = f"bits_goal_{g_idx.item()}"
+                        metrics[key].append(bits_per_elem[mask].mean().item())
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}

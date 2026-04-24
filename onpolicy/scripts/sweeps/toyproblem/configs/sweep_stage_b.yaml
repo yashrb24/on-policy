@@ -1,0 +1,62 @@
+# Phase 2 Stage B sweep — architecture & PPO hyperparameters
+#
+# Run AFTER Stage A winner is identified. Replace placeholders below with
+# the Stage A winner's channel / lambda_comms / delta / z_dim values.
+#
+# Fixed: stage_a_best values for channel, lambda, delta, z_dim
+
+program: onpolicy/scripts/sweeps/toyproblem/sweep_wrapper.py
+method: grid
+name: ddcl_toyproblem_stage_b
+
+parameters:
+  # Stage A winner — UPDATE THESE after Stage A completes:
+  channel:
+    value: sd          # PLACEHOLDER: replace with Stage A winner
+
+  lambda_comms:
+    value: 4.0e-3      # PLACEHOLDER
+
+  delta:
+    value: 10.0        # PLACEHOLDER
+
+  z_dim:
+    value: 3           # PLACEHOLDER
+
+  # Stage B sweep axes:
+  hidden_size:
+    values: [32, 64, 128, 256]
+
+  lr:
+    values: [1.0e-4, 3.0e-4, 5.0e-4, 1.0e-3, 3.0e-3]
+
+  num_minibatches:
+    values: [2, 4, 8, 16]   # batch_size = n_steps*n_envs/num_mb = 4096/num_mb
+
+  clip_eps:
+    values: [0.1, 0.2, 0.3]
+
+  gae_lambda:
+    values: [0.90, 0.95, 0.99]
+
+  entropy_coef:
+    values: [0.0, 0.001, 0.01, 0.05]
+
+  # Fixed:
+  n_envs:
+    value: 16
+
+  n_steps:
+    value: 256
+
+  total_timesteps:
+    value: 1000000
+
+  update_epochs:
+    value: 10
+
+  max_grad_norm:
+    value: 0.5
+
+  gamma:
+    value: 0.99

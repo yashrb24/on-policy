@@ -32,6 +32,8 @@ class RolloutBuffer:
         self.values = torch.zeros(n_steps, n_envs, 1, device=device)
         self.rewards = torch.zeros(n_steps, n_envs, device=device)
         self.dones = torch.zeros(n_steps, n_envs, device=device)
+        # Goal index (0-5) for per-goal bit-allocation logging (Phase 1).
+        self.goal_ids = torch.zeros(n_steps, n_envs, dtype=torch.long, device=device)
 
         # Filled by compute_returns_and_advantages.
         self.advantages = torch.zeros(n_steps, n_envs, device=device)
@@ -51,6 +53,7 @@ class RolloutBuffer:
         value: torch.Tensor,
         reward: torch.Tensor,
         done: torch.Tensor,
+        goal_id: torch.Tensor | None = None,
     ) -> None:
         t = self.step
         self.goals[t] = goal
@@ -60,6 +63,8 @@ class RolloutBuffer:
         self.values[t] = value
         self.rewards[t] = reward
         self.dones[t] = done
+        if goal_id is not None:
+            self.goal_ids[t] = goal_id
         self.step += 1
 
     def compute_returns_and_advantages(
@@ -105,6 +110,7 @@ class RolloutBuffer:
         log_probs = self.log_probs.reshape(batch_size)
         advantages = self.advantages.reshape(batch_size)
         returns = self.returns.reshape(batch_size)
+        goal_ids = self.goal_ids.reshape(batch_size)
 
         if shuffle:
             idx = torch.randperm(batch_size, device=self.device)
@@ -120,4 +126,5 @@ class RolloutBuffer:
                 "old_log_probs": log_probs[mb],
                 "advantages": advantages[mb],
                 "returns": returns[mb],
+                "goal_ids": goal_ids[mb],
             }

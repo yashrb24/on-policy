@@ -1,0 +1,105 @@
+# Phase 2 Stage A sweep — channel × λ × δ × z_dim
+#
+# Fixed: hidden=64, lr=3e-4, n_envs=16, n_steps=256, 1M steps, seeds {0..4}
+#
+# To launch (offline, no WandB):
+#   cd on-policy && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+#       python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
+#       --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
+#       --seeds 0 1 2 3 4 \
+#       --log_dir onpolicy/envs/toyproblem/runs/sweep_stage_a \
+#       --resume --shuffle
+#
+# ─── DESIGN NOTES ────────────────────────────────────────────────────────────
+#
+# Channels included:
+#   sd, nsd          — DDCL variants (variable-rate, main subject)
+#   additive_uniform — 1st-order Schuchman control (same bit formula as SD/NSD,
+#                      but no 2nd-order Schuchman property). Included to make the
+#                      rate-distortion comparison fair: it sweeps the same λ/δ
+#                      grid, so its Pareto frontier is directly comparable.
+#   none             — float32 passthrough. λ and δ are IGNORED by this channel
+#                      (comms_loss returns 0 regardless), so all (λ,δ) combos
+#                      produce the same result. We run only (λ=0, δ=1.0) to avoid
+#                      redundant runs. The full grid would waste 48×5 = 240 runs.
+#
+# NOTE on `none` channel efficiency:
+#   The run_sweep.py --channel_skip_lambda flag (see run_sweep.py) can skip
+#   λ>0 runs for `none`. Alternatively, post-hoc deduplication is fine since
+#   all `none` runs with identical z_dim produce identical final metrics.
+#
+# Grid size (approximate):
+#   sd/nsd/additive_uniform: 3 channels × 8 λ × 6 δ × 3 z_dim × 5 seeds = 2160 runs
+#   none                   : 1 channel  × 1 λ × 1 δ × 3 z_dim × 5 seeds = 15 runs
+#   Total: ~2175 runs
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: onpolicy/scripts/sweeps/toyproblem/sweep_wrapper.py
+method: grid
+name: ddcl_toyproblem_stage_a
+
+parameters:
+  channel:
+    values: [sd, nsd, additive_uniform, none]
+    # `none` with lambda_comms > 0 is a no-op (comms_loss = 0 always).
+    # run_sweep.py skips redundant none×lambda>0 combinations automatically.
+
+  lambda_comms:
+    values: [0.0, 1.0e-5, 1.0e-4, 5.0e-4, 1.0e-3, 4.0e-3, 1.0e-2, 3.0e-2]
+    # Range rationale: 0=no penalty (upper SR bound); 3e-2=aggressive (lower SR bound).
+    # Based on channel comparison: λ=4e-3 at δ=10 collapsed SR to ~55%.
+    # The interior optimum (convergence gate criterion 1) should lie in [1e-4, 4e-3].
+
+  delta:
+    values: [0.5, 1.0, 5.0, 10.0, 15.0, 20.0]
+    # Range rationale: 0.5=fine bins (many levels, many bits); 20.0=coarse (1–2 levels).
+    # For z_dim=2 at convergence, |z| ≈ 2–8 (empirical from channel comparison).
+    # At δ=1.0, |m| ≈ 2–8 → 1–3 bits; at δ=10.0, |m| ≈ 0–1 → 0–1 bits.
+    # The interior optimum should lie in [1.0, 10.0] for DDCL channels.
+
+  z_dim:
+    values: [1, 2, 3]
+    # z_dim=1: minimal capacity (can the speaker encode 6 goals in 1 real number?)
+    # z_dim=2: expected to be sufficient (H(G)≈1.81 bits; 2 dims gives plenty of room)
+    # z_dim=3: overcomplete but useful to test if extra dimensions are wasted
+
+  # ── Fixed across Stage A ──────────────────────────────────────────────────
+
+  hidden_size:
+    value: 64
+
+  lr:
+    value: 3.0e-4
+
+  n_envs:
+    value: 16
+
+  n_steps:
+    value: 256
+
+  total_timesteps:
+    value: 1000000
+    # 1M steps / (16 envs × 256 steps) = 244 PPO updates.
+    # Empirically: SR reaches plateau at ~150 updates; 244 gives stable final metrics.
+
+  clip_eps:
+    value: 0.2
+
+  update_epochs:
+    value: 10
+
+  num_minibatches:
+    value: 4
+
+  entropy_coef:
+    value: 0.03
+
+  max_grad_norm:
+    value: 0.5
+
+  gamma:
+    value: 0.99
+
+  gae_lambda:
+    value: 0.95
