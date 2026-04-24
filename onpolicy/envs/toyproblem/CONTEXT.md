@@ -4,7 +4,7 @@
 
 Every session must follow these rules — no exceptions.
 
-**At session start:** Read this file. Then read the relevant section of `PLAN.md` for the current phase.
+**At session start:** Read this file. Then read the relevant section of `PLAN.md` for the current phase. If working on a pillar (Phase 3), also read `docs/pillars/PILLAR_P<N>.md` for the pillar being worked on — it contains the full theoretical and implementation spec.
 
 **During the session — update the right file immediately when something happens:**
 
@@ -24,6 +24,7 @@ Every session must follow these rules — no exceptions.
 - What broke and how it was fixed → `docs/ISSUES_TRACKER.md`
 - Mathematical derivations → `docs/MATH.md`
 - Statistical methods → `docs/STATS.md`
+- Pillar theory and implementation spec → `docs/pillars/PILLAR_P<N>.md`
 - Current running state → this file (CONTEXT.md) only
 
 ---
@@ -70,6 +71,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 10 (2026-04-24):** Designed P2 — Entropy Model pillar in full. Prior family: Discretised Logistic Mixture (DLM), K components, factored primary / joint autoregressive ablation. Context A (marginal prior) is primary; B (condition on z) and C (condition on h) are supplementary ablations. Gradient path: Ballé-style two-term loss (fwd trains q_φ on discrete m; bwd propagates to speaker via continuous relaxation). Metrics: entropy_rate, H_m_empirical, qphi_gap, tc_bits, qphi_neg_log_max. Unbounded m handled naturally by DLM tails. Moving target mitigated by lr_qphi, n_qphi_steps, warm-start. Wrote `docs/pillars/PILLAR_P2.md` (full spec), stubs `PILLAR_P1.md`, `PILLAR_P3.md`, `PILLAR_P4.md`. Updated CONTEXT.md mandatory protocol to reference pillar docs at session start.
 
 **Session 9 (2026-04-24):** Unified data layout. Canonical paths: `runs/toyproblem/<exp>/` and `results/toyproblem/<exp>/` at repo root (both gitignored). Deleted stale top-level `docs/` and `runs/` (pre-consolidation artefacts). Moved `toyproblem/runs/channel_comparison` → `runs/toyproblem/channel_comparison`; `toyproblem/docs/results/channel_comparison` → `results/toyproblem/channel_comparison`. Active sweep_stage_a left in place (sweep still running). Removed `plots/` and `paper_figures/` split — all figures go to `figures/`. Updated all script defaults and docs. Committed `f2c7a6a` and follow-on.
 
