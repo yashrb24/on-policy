@@ -70,7 +70,7 @@ def generate_report(
     sweep_dir = Path(sweep_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir = out_dir / "plots"
+    plots_dir = out_dir / "figures"
     plots_dir.mkdir(exist_ok=True)
 
     if sweep_axes is None:

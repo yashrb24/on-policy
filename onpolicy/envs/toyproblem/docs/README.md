@@ -36,7 +36,7 @@ Read this section first to know where to look for any given type of information.
 | **`docs/ISSUES_TRACKER.md`** | Authoritative log of every bug, installation issue, test failure, math error, or reproducibility blocker encountered during development. Each entry has: symptom, root cause, fix, status, reproducibility impact. Also contains the master reproducibility checklist. |
 | **`CONTEXT.md`** | Living session log. Tracks the true current state of the project: phase status, what is fully done, immediate next tasks, key decisions, and a per-session log of what was done, found, and fixed. **Read this at the start of every session.** |
 | **`PLAN.md`** | Full approved 5-phase project plan with detailed sub-tasks, success criteria, and gating conditions for each phase. Authoritative reference for scope and phase sequencing. |
-| **`docs/results/`** | Auto-generated result artefacts from analysis scripts. Each sub-directory corresponds to one sweep run (e.g. `channel_comparison/`, `sweep_stage_a/`). Contains `baseline.md` (convergence gate report), standard plots (`.png`), and a `paper_figures/` sub-directory with the 12 publication-quality figures. Do not edit by hand — regenerate by running `report_baseline.py`. |
+| **`docs/results/`** | Auto-generated result artefacts from analysis scripts. Each sub-directory corresponds to one sweep run (e.g. `channel_comparison/`, `sweep_stage_a/`). Contains `baseline.md` (convergence gate report) and a `figures/` sub-directory with all plots — both diagnostic and publication-quality. Do not edit by hand — regenerate by running `report_baseline.py` and `generate_all_paper_figures`. |
 
 ---
 
@@ -379,7 +379,7 @@ KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     --out_dir onpolicy/envs/toyproblem/docs/results/channel_comparison
 ```
 
-Results: `docs/results/channel_comparison/baseline.md` + 7 standard plots.
+Results: `docs/results/channel_comparison/baseline.md` + plots in `docs/results/channel_comparison/figures/`.
 The convergence gate will FAIL here (only one λ/δ point per channel — not a sweep).
 That is expected. Use fig1 to check that `none` sits at high bits and `sd`/`nsd` are
 somewhere on a lower-bits frontier.
@@ -442,11 +442,12 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 
 ### Step 6 — Generate Stage A report and paper figures
 
-Run this at any point (even while the sweep is still running) to get interim results.
-Re-run after sweep completes for the final analysis.
+All figures (diagnostic + publication-quality) go into a single `figures/` directory under the
+sweep output. Run this at any point — even while the sweep is still running — and re-run after it
+completes for the final analysis.
 
 ```bash
-# Standard report: convergence gate + 7 plots
+# Standard report + diagnostic plots → docs/results/sweep_stage_a/figures/
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.envs.toyproblem.analysis.report_baseline \
     --sweep_dir onpolicy/envs/toyproblem/runs/sweep_stage_a \
@@ -454,7 +455,7 @@ KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
 ```
 
 ```bash
-# All 12 paper figures (hypothesis / analysis / conclusion annotations)
+# Publication-quality figures (fig1–fig10) → same figures/ directory
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms python -c "
 from onpolicy.envs.toyproblem.analysis.load_runs import load_sweep, final_metrics, seed_aggregate
 from onpolicy.envs.toyproblem.analysis.paper_figures import generate_all_paper_figures
@@ -462,7 +463,7 @@ df = load_sweep('onpolicy/envs/toyproblem/runs/sweep_stage_a')
 summary = final_metrics(df)
 agg = seed_aggregate(summary, group_cols=['channel','lambda_comms','delta','z_dim'])
 generate_all_paper_figures(df, summary, agg,
-    out_dir='onpolicy/envs/toyproblem/docs/results/sweep_stage_a/paper_figures')
+    out_dir='onpolicy/envs/toyproblem/docs/results/sweep_stage_a/figures')
 "
 ```
 
@@ -607,7 +608,7 @@ raw, unsmoothed values. Every run writes `metrics.csv` to disk; the analysis scr
 | `analysis/stats.py` | ✅ Done | `bootstrap_ci`, `iqm_ci`, `paired_permutation_test`, `wilcoxon_signed_rank`, `pareto_frontier` |
 | `analysis/plots.py` | ✅ Done | `plot_training_curves`, `plot_rate_distortion`, `plot_per_goal_bits` (with Jensen+RL uncertainty bands), `plot_sweep_heatmap`, `plot_channel_comparison` |
 | `analysis/sweep_convergence.py` | ✅ Done | `check_convergence()` — 4-criterion automated gate; returns `ConvergenceResult` with pass/fail per criterion |
-| `analysis/report_baseline.py` | ✅ Done | Full pipeline: load sweep → convergence gate → 7 standard plots → `baseline.md` |
+| `analysis/report_baseline.py` | ✅ Done | Full pipeline: load sweep → convergence gate → diagnostic plots in `figures/` → `baseline.md` |
 | `analysis/paper_figures.py` | ✅ Done | 12 publication-quality figures (fig1–fig10), each with `Hypothesis / Analysis / Conclusion` annotation; `generate_all_paper_figures()` batch runner |
 | `analysis/prng_robustness.py` | 🔲 Phase 3.4 | PRNG desync robustness evaluation |
 | `analysis/scaling_plots.py` | 🔲 Phase 4 | Scaling-law figures |
