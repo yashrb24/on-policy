@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta_target", type=float, default=1e-2)
     p.add_argument("--beta_warmup", type=int, default=100_000)
     p.add_argument("--beta_anneal", type=int, default=300_000)
+    p.add_argument("--gmm_tau", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--log_dir", type=str, default="runs/toyproblem")
@@ -94,6 +95,7 @@ def main() -> None:
         beta_target=args.beta_target,
         beta_warmup=args.beta_warmup,
         beta_anneal=args.beta_anneal,
+        gmm_tau=args.gmm_tau,
     )
     trainer = MAPPOTrainer(config, device=device)
     buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)

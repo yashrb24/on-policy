@@ -87,6 +87,30 @@ class GMMPrior(nn.Module):
         p = self.pi
         return -(p * torch.log(p + 1e-12)).sum()
 
+    def mean_repulsion(self, eps: float = 1e-2) -> torch.Tensor:
+        """Log-barrier repulsion between component means.
+
+        For the independent structure, mu is (K, D). We sum over all pairs
+        (i < j) and all dimensions d:
+            repulsion = -sum_{i<j, d} log(|mu_i_d - mu_j_d| + eps)
+
+        This is positive (since log of a small number is very negative, and
+        we negate it), and its gradient pushes adjacent means apart.
+        Minimising `tau * repulsion` (i.e. adding it to the total_loss with a
+        positive tau) encourages mean separation.
+
+        For the joint structure the same formula applies — mu is still (K, D).
+        """
+        # mu: (K, D)
+        # Pairwise differences: (K, K, D)
+        diff = self.mu.unsqueeze(0) - self.mu.unsqueeze(1)  # (K, K, D)
+        # Lower-triangular mask to select i < j pairs
+        K = self.mu.shape[0]
+        mask = torch.tril(torch.ones(K, K, device=self.mu.device, dtype=torch.bool), diagonal=-1)
+        # diff[mask]: (K*(K-1)/2, D)
+        pair_diffs = diff[mask]                              # (n_pairs, D)
+        return -torch.log(pair_diffs.abs() + eps).sum()
+
 
 def beta_schedule(
     step: int, warmup: int, anneal: int, beta_max: float

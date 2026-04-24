@@ -36,6 +36,7 @@ class MAPPOConfig:
     beta_target: float = 1e-2
     beta_warmup: int = 100_000          # env timesteps before prior kicks in
     beta_anneal: int = 300_000          # env timesteps over which beta ramps
+    gmm_tau: float = 0.0               # entropy bonus coefficient for GMM weights
 
 
 class MAPPOTrainer(nn.Module):
@@ -178,9 +179,14 @@ class MAPPOTrainer(nn.Module):
 
                     gmm_mle = -self.gmm_prior.log_prob(z_new.detach()).mean()
 
-                    total_loss = total_loss + beta * prior_for_speaker + gmm_mle
+                    gmm_repulsion = self.gmm_prior.mean_repulsion()
+                    gmm_ent = self.gmm_prior.weights_entropy()
+                    total_loss = (
+                        total_loss + beta * prior_for_speaker + gmm_mle
+                        + self.config.gmm_tau * gmm_repulsion
+                    )
                     prior_nll_val = prior_for_speaker.item()
-                    gmm_entropy_val = self.gmm_prior.weights_entropy().item()
+                    gmm_entropy_val = gmm_ent.item()
 
                 self.optim.zero_grad(set_to_none=True)
                 if self.gmm_optim is not None:

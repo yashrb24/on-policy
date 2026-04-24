@@ -57,6 +57,7 @@ def _config_from_args(ns: argparse.Namespace) -> MAPPOConfig:
         beta_target=getattr(ns, "beta_target", 1e-2),
         beta_warmup=getattr(ns, "beta_warmup", 100_000),
         beta_anneal=getattr(ns, "beta_anneal", 300_000),
+        gmm_tau=getattr(ns, "gmm_tau", 0.0),
     )
 
 
