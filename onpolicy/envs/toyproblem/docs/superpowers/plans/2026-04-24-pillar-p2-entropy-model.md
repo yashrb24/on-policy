@@ -16,7 +16,7 @@
 
 **Goal:** Add a learned prior `q_φ(m)` (Discretised Logistic Mixture) as the communication rate surrogate, replacing the magnitude upper bound `log₂(|z|/δ + 1)` with `E[-log₂ q_φ(m)]`.
 
-**Architecture:** Three new classes in `network.py` (`EntropyModelFactored`, `EntropyModelJoint`, `EntropyModelCondZ`), plus two helper functions for empirical entropy. `trainer.py` gains a second Adam optimizer for `q_φ`, a warm-start method, and per-minibatch forward+backward entropy losses. `train.py` gets 8 new CLI flags and extended CSV columns.
+**Architecture:** Four new classes in `network.py` (`EntropyModelFactored`, `EntropyModelJoint`, `EntropyModelCondZ`, `EntropyModelJointCondZ`) closing the full 2×2 of (factored/joint) × (context A/B), plus two helper functions for empirical entropy. `trainer.py` gains a second Adam optimizer for `q_φ`, a warm-start method, and per-minibatch forward+backward entropy losses. `train.py` gets 8 new CLI flags and extended CSV columns. `run_p2_ablation.py` implements a 6-stage systematic study (395 runs total).
 
 **Tech Stack:** PyTorch (nn.Parameter, Adam), NumPy (histogram-based entropy estimate), existing `MAPPOTrainer`/`MAPPOConfig`/`RolloutBuffer` infrastructure.
 
@@ -26,11 +26,11 @@
 
 | Action | File | Responsibility |
 |--------|------|----------------|
-| Modify | `onpolicy/envs/toyproblem/network.py` | Add 3 entropy model classes + 3 helper functions |
+| Modify | `onpolicy/envs/toyproblem/network.py` | Add 4 entropy model classes + 3 helper functions |
 | Modify | `onpolicy/envs/toyproblem/trainer.py` | Add 8 config fields, q_φ optimizer, Ballé loss, warm-start, P2 metrics |
 | Modify | `onpolicy/envs/toyproblem/train.py` | Add 8 CLI flags, extend CSV header |
-| Create | `onpolicy/envs/toyproblem/tests/test_entropy_model.py` | Unit tests for all 3 models, helpers, trainer integration |
-| Create | `onpolicy/envs/toyproblem/experiments/run_p2_ablation.py` | Orchestrate P2 ablation grid |
+| Create | `onpolicy/envs/toyproblem/tests/test_entropy_model.py` | Unit tests for all 4 models, helpers, trainer integration |
+| Create | `onpolicy/envs/toyproblem/experiments/run_p2_ablation.py` | 6-stage systematic ablation (395 runs) |
 | Modify | `onpolicy/envs/toyproblem/analysis/paper_figures.py` | Add 4 P2 figure functions |
 
 ---
@@ -471,6 +471,169 @@ git commit -m "feat(p2): add EntropyModelCondZ (Context-B conditioned on z)"
 
 ---
 
+## Task 3b: EntropyModelJointCondZ (Context B + joint) — closes the 2×2 grid
+
+**Files:**
+- Modify: `onpolicy/envs/toyproblem/tests/test_entropy_model.py`
+- Modify: `onpolicy/envs/toyproblem/network.py`
+
+This is the 4th cell of the (factored/joint) × (context A/B) grid:
+`q_φ(m | z) = q_0(m_0 | z) · q_1(m_1 | m_0, z) · q_2(m_2 | m_0, m_1, z)`
+
+Each conditional MLP takes `[m_{<k}, z]` as input, adding z as an extra context vector alongside the autoregressive prefix.
+
+- [ ] **Step 1: Append failing tests**
+
+```python
+from onpolicy.envs.toyproblem.network import EntropyModelJointCondZ
+
+
+class TestEntropyModelJointCondZ:
+    def test_output_shape(self):
+        model = EntropyModelJointCondZ(z_dim=3, K=5)
+        m = torch.zeros(32, 3)
+        z = torch.randn(32, 3)
+        nll = model.nll_bits(m, z)
+        assert nll.shape == (32, 3)
+
+    def test_nll_positive(self):
+        torch.manual_seed(0)
+        model = EntropyModelJointCondZ(z_dim=3, K=5)
+        m = torch.randn(64, 3).round()
+        z = torch.randn(64, 3)
+        nll = model.nll_bits(m, z)
+        assert (nll >= 0).all()
+
+    def test_z_dim_1_matches_condz(self):
+        """Joint+CondZ with z_dim=1 reduces to CondZ (no autoregressive prefix)."""
+        torch.manual_seed(42)
+        cond_z = EntropyModelCondZ(z_dim=1, K=3)
+        joint_cond_z = EntropyModelJointCondZ(z_dim=1, K=3)
+        # Copy dim-0 MLP weights from cond_z into joint_cond_z.mlp_0
+        with torch.no_grad():
+            for p_src, p_dst in zip(cond_z.mlps[0].parameters(),
+                                    joint_cond_z.mlp_0.parameters()):
+                p_dst.copy_(p_src)
+        m = torch.tensor([[0.0], [1.0], [-1.0]])
+        z = torch.randn(3, 1)
+        assert torch.allclose(cond_z.nll_bits(m, z), joint_cond_z.nll_bits(m, z), atol=1e-5)
+
+    def test_different_z_different_output(self):
+        """Conditioning on z must change output."""
+        torch.manual_seed(0)
+        model = EntropyModelJointCondZ(z_dim=2, K=3)
+        m = torch.zeros(8, 2)
+        z1 = torch.randn(8, 2)
+        z2 = torch.randn(8, 2)
+        assert not torch.allclose(model.nll_bits(m, z1), model.nll_bits(m, z2))
+
+    def test_grad_flows_to_z_and_m_context(self):
+        """Frozen q_φ: grad flows to both z and m (autoregressive context)."""
+        model = EntropyModelJointCondZ(z_dim=3, K=3)
+        z = torch.randn(8, 3, requires_grad=True)
+        x = torch.randn(8, 3, requires_grad=True)
+        for p in model.parameters():
+            p.requires_grad_(False)
+        nll = model.nll_bits(x, z)
+        nll.mean().backward()
+        assert z.grad is not None
+        assert x.grad is not None
+        for p in model.parameters():
+            p.requires_grad_(True)
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+```
+KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+    pytest onpolicy/envs/toyproblem/tests/test_entropy_model.py::TestEntropyModelJointCondZ -v 2>&1 | head -10
+```
+
+Expected: `ImportError: cannot import name 'EntropyModelJointCondZ'`
+
+- [ ] **Step 3: Implement EntropyModelJointCondZ in network.py**
+
+Add after `EntropyModelCondZ`:
+
+```python
+class EntropyModelJointCondZ(nn.Module):
+    """Context-B autoregressive DLM: q_φ(m | z).
+
+    q(m|z) = q_0(m_0|z) · ∏_{k≥1} q_k(m_k | m_0,...,m_{k-1}, z)
+
+    Closes the 2×2 of (factored/joint) × (context A/B). Each conditional MLP
+    takes [m_{<k}, z] as context, so z informs every conditional directly.
+    For z_dim=1 this reduces to EntropyModelCondZ.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # Dim 0: conditioned on z only  (input size = z_dim)
+        self.mlp_0 = nn.Sequential(
+            nn.Linear(z_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3 * K),
+        )
+        # Dims 1..z_dim-1: conditioned on [m_{<k}, z]  (input size = k + z_dim)
+        self.cond_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(k + z_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for k in range(1, z_dim)
+        ])
+
+    @staticmethod
+    def _eval_dlm_1d(
+        x_k: torch.Tensor,     # (...)
+        params: torch.Tensor,  # (..., 3K)
+        K: int,
+    ) -> torch.Tensor:         # (...)
+        log_pi = params[..., :K]
+        mu = params[..., K:2 * K]
+        s = (params[..., 2 * K:] + 1.0).exp()  # wide init bias
+        x_e = x_k.unsqueeze(-1)                 # (..., 1)
+        upper = torch.sigmoid((x_e + 0.5 - mu) / s)
+        lower = torch.sigmoid((x_e - 0.5 - mu) / s)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        return torch.logsumexp(
+            log_pi_n + (upper - lower).clamp(min=1e-10).log(), dim=-1
+        )
+
+    def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Log q_φ(x|z) per dimension. x, z: (..., z_dim)."""
+        lp = [self._eval_dlm_1d(x[..., 0], self.mlp_0(z), self.K)]
+        for k, mlp in enumerate(self.cond_mlps, start=1):
+            context = torch.cat([x[..., :k], z], dim=-1)  # (..., k + z_dim)
+            lp.append(self._eval_dlm_1d(x[..., k], mlp(context), self.K))
+        return torch.stack(lp, dim=-1)  # (..., z_dim)
+
+    def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x, z) / math.log(2)
+```
+
+- [ ] **Step 4: Run tests**
+
+```
+KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+    pytest onpolicy/envs/toyproblem/tests/test_entropy_model.py::TestEntropyModelJointCondZ -v
+```
+
+Expected: 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add onpolicy/envs/toyproblem/network.py \
+        onpolicy/envs/toyproblem/tests/test_entropy_model.py
+git commit -m "feat(p2): add EntropyModelJointCondZ (Context-B autoregressive, closes 2x2 grid)"
+```
+
+---
+
 ## Task 4: Empirical entropy helpers — tests first
 
 **Files:**
@@ -644,6 +807,11 @@ class TestTrainerEntropyModelConstruction:
         t = self._make_trainer(entropy_model_type="factored", entropy_model_context="B")
         assert isinstance(t.entropy_model, EntropyModelCondZ)
 
+    def test_joint_cond_z_B_constructed(self):
+        from onpolicy.envs.toyproblem.network import EntropyModelJointCondZ
+        t = self._make_trainer(entropy_model_type="joint", entropy_model_context="B")
+        assert isinstance(t.entropy_model, EntropyModelJointCondZ)
+
     def test_entropy_model_none_when_disabled(self):
         cfg = MAPPOConfig(z_dim=3, channel="sd", use_entropy_model=False)
         t = MAPPOTrainer(cfg, device=torch.device("cpu"))
@@ -708,7 +876,8 @@ At the top of `trainer.py`, add to the existing import from network.py:
 ```python
 from onpolicy.envs.toyproblem.network import (
     Critic, ListenerActor, SpeakerNetwork,
-    EntropyModelFactored, EntropyModelJoint, EntropyModelCondZ,
+    EntropyModelFactored, EntropyModelJoint,
+    EntropyModelCondZ, EntropyModelJointCondZ,
 )
 ```
 
@@ -728,10 +897,12 @@ In `MAPPOTrainer.__init__`, after `self.value_norm = ValueNorm(...)`, add:
                 self.entropy_model = EntropyModelJoint(config.z_dim, K).to(device)
             elif ctx == "B" and typ == "factored":
                 self.entropy_model = EntropyModelCondZ(config.z_dim, K).to(device)
+            elif ctx == "B" and typ == "joint":
+                self.entropy_model = EntropyModelJointCondZ(config.z_dim, K).to(device)
             else:
                 raise ValueError(
                     f"Unsupported entropy_model_context={ctx!r}, type={typ!r}. "
-                    f"Supported: (A, factored), (A, joint), (B, factored)."
+                    f"Supported: (A, factored), (A, joint), (B, factored), (B, joint)."
                 )
             self.optim_qphi = torch.optim.Adam(
                 self.entropy_model.parameters(),
@@ -1388,49 +1559,70 @@ git commit -m "test(p2): smoke run verified — all P2 CSV columns present and f
 
 ---
 
-## Task 10: Ablation runner
+## Task 10: Ablation runner — 6-stage systematic study
 
 **Files:**
 - Create: `onpolicy/envs/toyproblem/experiments/run_p2_ablation.py`
+
+The runner supports `--stage P2-A|P2-B|P2-C|P2-D|P2-E|P2-F|all`. Stages P2-C through P2-F require winner flags from earlier stages — pass them via `--best_K`, `--best_model_type`, `--best_context`, `--best_loss_mode`, `--best_lambda`, `--best_z_dim`, `--best_delta`. See PILLAR_P2.md §10 for stage ordering and run counts.
 
 - [ ] **Step 1: Create the ablation runner**
 
 Create `onpolicy/envs/toyproblem/experiments/run_p2_ablation.py`:
 
 ```python
-"""P2 ablation study runner.
+"""P2 systematic ablation study — 6 staged experiments, ~395 total runs.
 
-Runs the full P2 ablation grid (context A/B, factored/joint, K values) and
-comparison baselines. All runs write to runs/toyproblem/p2_ablation/.
+Stage ordering (each stage requires winners from prior stages):
+  P2-A  Model selection   (165 runs) — vary K, model_type, context, loss_comms_mode
+  P2-B  λ re-sweep         (70 runs) — P2 rate-distortion frontier; find optimal λ
+  P2-C  z_dim interaction  (40 runs) — factored vs joint gap at z_dim={1,2,3}
+  P2-D  δ interaction      (40 runs) — P2 gain vs quantisation width
+  P2-E  Channel (sd/nsd)   (20 runs) — P2 compatibility with NSD dithering
+  P2-F  Robustness OAT     (60 runs) — lr_qphi_mult, n_qphi_steps, n_warmup_steps
 
 Usage (from repo root):
+    # Stage P2-A (model selection):
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
         python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
-        --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation \\
-        --baseline_config configs/baseline_best.yaml
+        --stage P2-A --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation
 
-Analysis:
+    # Stage P2-B (after inspecting P2-A results):
+    KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
+        python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
+        --stage P2-B --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation \\
+        --best_K 5 --best_model_type factored --best_context A --best_loss_mode entropy
+
+    # Stages P2-C through P2-F (after P2-B results):
+    KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
+        python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
+        --stage P2-C --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation \\
+        --best_K 5 --best_model_type factored --best_context A \\
+        --best_loss_mode entropy --best_lambda 4e-3
+
+    # Dry run any stage:
+        ... --dry_run
+
+Analysis after each stage:
     from onpolicy.envs.toyproblem.analysis.load_runs import load_sweep, final_metrics, seed_aggregate
     df = load_sweep("runs/toyproblem/p2_ablation")
-    # group by: context, model_type, K, loss_comms_mode
+    summary = final_metrics(df)
+    # group by exp_name to compare conditions within each stage
 """
 from __future__ import annotations
 
 import argparse
 import subprocess
 import sys
-from itertools import product
-from pathlib import Path
+from typing import Iterator
 
 
 _BASE_TRAIN_CMD = [sys.executable, "-m", "onpolicy.envs.toyproblem.train"]
 
-# Fixed training settings (from baseline_best.yaml after Phase 2 sweeps complete).
-# These are placeholder defaults; override via --baseline_config if available.
-_FIXED = dict(
+# Fixed settings shared across all stages (overridden per-stage as needed).
+# Populated from Phase 2 baseline_best.yaml defaults — edit if Phase 2 winner differs.
+_SHARED = dict(
     channel="sd",
-    delta="1.0",
-    lambda_comms="1e-3",
     total_timesteps="500000",
     n_envs="16",
     n_steps="256",
@@ -1440,137 +1632,250 @@ _FIXED = dict(
     num_minibatches="4",
 )
 
+# P2 training defaults (used unless overridden by robustness OAT in P2-F)
+_P2_TRAIN_DEFAULTS = dict(
+    n_warmup_steps="5000",
+    n_qphi_steps="3",
+    lr_qphi_mult="10.0",
+)
 
-def _run(exp_name: str, seed: int, log_dir: str, extra: dict[str, str]) -> None:
-    cmd = _BASE_TRAIN_CMD + [
-        "--exp_name", exp_name,
-        "--seed", str(seed),
-        "--log_dir", log_dir,
-    ]
-    for k, v in {**_FIXED, **extra}.items():
-        cmd += [f"--{k}", str(v)]
-    print(f"[run] {exp_name} seed={seed}")
+
+def _run(exp_name: str, seed: int, log_dir: str, extra: dict) -> None:
+    cmd = _BASE_TRAIN_CMD + ["--exp_name", exp_name, "--seed", str(seed),
+                              "--log_dir", log_dir]
+    for k, v in extra.items():
+        if v == "":          # store_true flags (e.g. --use_entropy_model)
+            cmd.append(f"--{k}")
+        else:
+            cmd += [f"--{k}", str(v)]
+    print(f"  [run] {exp_name} seed={seed}")
     subprocess.run(cmd, check=True)
 
 
-def _ablation_grid():
-    """Yield (exp_name, extra_flags) for each ablation condition."""
-    # Baseline: magnitude surrogate only (no entropy model)
-    yield "baseline_magnitude", {}
+def _stage_a(args) -> Iterator[tuple[str, dict]]:
+    """Model selection: K × model_type × context × loss_comms_mode (165 runs)."""
+    base = {**_SHARED, "delta": args.phase2_delta, "z_dim": args.phase2_z_dim,
+            "lambda_comms": args.phase2_lambda, **_P2_TRAIN_DEFAULTS}
 
-    # Primary P2: context A, factored, vary K
-    for K in [1, 3, 5, 10, 20]:
-        name = f"p2_A_factored_K{K}"
-        yield name, {
+    yield "baseline_magnitude", base
+
+    K_values = [1, 3, 5, 10, 20]
+    for K in K_values:
+        for mode in ["entropy", "both"]:
+            for model_type in ["factored", "joint"]:
+                for context in ["A", "B"]:
+                    # Skip (joint, B) for K != 5 to keep run count manageable;
+                    # (joint, B) K=5 is sufficient to close the 2x2 grid.
+                    if context == "B" and model_type == "joint" and K != 5:
+                        continue
+                    name = f"p2_{context}_{model_type}_K{K}_{mode}"
+                    yield name, {**base,
+                                  "use_entropy_model": "",
+                                  "entropy_model_K": str(K),
+                                  "entropy_model_type": model_type,
+                                  "entropy_model_context": context,
+                                  "loss_comms_mode": mode}
+
+
+def _stage_b(args) -> Iterator[tuple[str, dict]]:
+    """λ re-sweep for best P2 config; generates P2 rate-distortion frontier (35 new runs)."""
+    base = {**_SHARED, "delta": args.phase2_delta, "z_dim": args.phase2_z_dim,
+            **_P2_TRAIN_DEFAULTS}
+    lambdas = ["1e-5", "1e-4", "5e-4", "1e-3", "4e-3", "1e-2", "3e-2"]
+    for lam in lambdas:
+        name = f"p2_{args.best_context}_{args.best_model_type}_K{args.best_K}_{args.best_loss_mode}_lam{lam}"
+        yield name, {**base, "lambda_comms": lam,
+                     "use_entropy_model": "",
+                     "entropy_model_K": str(args.best_K),
+                     "entropy_model_type": args.best_model_type,
+                     "entropy_model_context": args.best_context,
+                     "loss_comms_mode": args.best_loss_mode}
+
+
+def _stage_c(args) -> Iterator[tuple[str, dict]]:
+    """z_dim interaction: factored vs joint gap at z_dim={1,2,3} (40 runs)."""
+    base = {**_SHARED, "delta": args.phase2_delta,
+            "lambda_comms": args.best_lambda, **_P2_TRAIN_DEFAULTS}
+    for z_dim in [1, 2, 3]:
+        # Baseline
+        yield f"baseline_magnitude_zdim{z_dim}", {**base, "z_dim": str(z_dim)}
+        # Factored
+        yield f"p2_A_factored_K{args.best_K}_zdim{z_dim}", {
+            **base, "z_dim": str(z_dim),
             "use_entropy_model": "",
-            "entropy_model_K": str(K),
+            "entropy_model_K": str(args.best_K),
             "entropy_model_type": "factored",
             "entropy_model_context": "A",
-            "loss_comms_mode": "entropy",
+            "loss_comms_mode": args.best_loss_mode,
+        }
+        # Joint only at z_dim >= 2 (trivially equal to factored at z_dim=1)
+        if z_dim >= 2:
+            yield f"p2_A_joint_K{args.best_K}_zdim{z_dim}", {
+                **base, "z_dim": str(z_dim),
+                "use_entropy_model": "",
+                "entropy_model_K": str(args.best_K),
+                "entropy_model_type": "joint",
+                "entropy_model_context": "A",
+                "loss_comms_mode": args.best_loss_mode,
+            }
+
+
+def _stage_d(args) -> Iterator[tuple[str, dict]]:
+    """δ interaction: P2 gain vs quantisation width (40 runs)."""
+    base = {**_SHARED, "z_dim": args.best_z_dim, "lambda_comms": args.best_lambda,
+            **_P2_TRAIN_DEFAULTS}
+    for delta in ["0.5", "1.0", "5.0", "10.0"]:
+        yield f"baseline_magnitude_delta{delta}", {**base, "delta": delta}
+        yield f"p2_best_delta{delta}", {
+            **base, "delta": delta,
+            "use_entropy_model": "",
+            "entropy_model_K": str(args.best_K),
+            "entropy_model_type": args.best_model_type,
+            "entropy_model_context": args.best_context,
+            "loss_comms_mode": args.best_loss_mode,
         }
 
-    # P2 joint vs factored (K=5)
-    yield "p2_A_joint_K5", {
-        "use_entropy_model": "",
-        "entropy_model_K": "5",
-        "entropy_model_type": "joint",
-        "entropy_model_context": "A",
-        "loss_comms_mode": "entropy",
-    }
 
-    # Context B (oracle ablation, factored K=5)
-    yield "p2_B_factored_K5", {
-        "use_entropy_model": "",
-        "entropy_model_K": "5",
-        "entropy_model_type": "factored",
-        "entropy_model_context": "B",
-        "loss_comms_mode": "entropy",
-    }
+def _stage_e(args) -> Iterator[tuple[str, dict]]:
+    """Channel interaction: P2 with sd vs nsd (20 runs)."""
+    base = {**_SHARED, "z_dim": args.best_z_dim, "delta": args.best_delta,
+            "lambda_comms": args.best_lambda, **_P2_TRAIN_DEFAULTS}
+    for channel in ["sd", "nsd"]:
+        yield f"baseline_magnitude_{channel}", {**base, "channel": channel}
+        yield f"p2_best_{channel}", {
+            **base, "channel": channel,
+            "use_entropy_model": "",
+            "entropy_model_K": str(args.best_K),
+            "entropy_model_type": args.best_model_type,
+            "entropy_model_context": args.best_context,
+            "loss_comms_mode": args.best_loss_mode,
+        }
 
-    # loss_comms_mode: entropy vs both (K=5, context A)
-    yield "p2_A_factored_K5_both", {
-        "use_entropy_model": "",
-        "entropy_model_K": "5",
-        "entropy_model_type": "factored",
-        "entropy_model_context": "A",
-        "loss_comms_mode": "both",
-    }
 
-    # lr_qphi multiplier ablation (K=5, context A, factored)
+def _stage_f(args) -> Iterator[tuple[str, dict]]:
+    """Training robustness OAT: lr_qphi_mult, n_qphi_steps, n_warmup_steps (60 runs)."""
+    base = {**_SHARED, "z_dim": args.best_z_dim, "delta": args.best_delta,
+            "channel": "sd", "lambda_comms": args.best_lambda,
+            "use_entropy_model": "",
+            "entropy_model_K": str(args.best_K),
+            "entropy_model_type": args.best_model_type,
+            "entropy_model_context": args.best_context,
+            "loss_comms_mode": args.best_loss_mode}
+
     for mult in [1, 5, 10, 50]:
-        yield f"p2_A_K5_lrqphi{mult}x", {
-            "use_entropy_model": "",
-            "entropy_model_K": "5",
-            "entropy_model_type": "factored",
-            "entropy_model_context": "A",
-            "loss_comms_mode": "entropy",
-            "lr_qphi_mult": str(float(mult)),
-        }
-
-    # n_qphi_steps ablation
+        yield f"p2_lrqphi{mult}x", {**base, "n_warmup_steps": "5000",
+                                      "n_qphi_steps": "3",
+                                      "lr_qphi_mult": str(float(mult))}
     for n in [1, 3, 5, 10]:
-        yield f"p2_A_K5_nsteps{n}", {
-            "use_entropy_model": "",
-            "entropy_model_K": "5",
-            "entropy_model_type": "factored",
-            "entropy_model_context": "A",
-            "loss_comms_mode": "entropy",
-            "n_qphi_steps": str(n),
-        }
-
-    # warm-start ablation
+        yield f"p2_nsteps{n}", {**base, "n_warmup_steps": "5000",
+                                  "lr_qphi_mult": "10.0",
+                                  "n_qphi_steps": str(n)}
     for ws in [0, 1000, 5000, 20000]:
-        yield f"p2_A_K5_warmup{ws}", {
-            "use_entropy_model": "",
-            "entropy_model_K": "5",
-            "entropy_model_type": "factored",
-            "entropy_model_context": "A",
-            "loss_comms_mode": "entropy",
-            "n_warmup_steps": str(ws),
-        }
+        yield f"p2_warmup{ws}", {**base, "lr_qphi_mult": "10.0",
+                                   "n_qphi_steps": "3",
+                                   "n_warmup_steps": str(ws)}
+
+
+_STAGE_FNS = {
+    "P2-A": _stage_a,
+    "P2-B": _stage_b,
+    "P2-C": _stage_c,
+    "P2-D": _stage_d,
+    "P2-E": _stage_e,
+    "P2-F": _stage_f,
+}
 
 
 def main() -> None:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description="P2 systematic ablation runner. See PILLAR_P2.md §10 for stage ordering."
+    )
+    p.add_argument("--stage", type=str,
+                   choices=list(_STAGE_FNS.keys()) + ["all"],
+                   required=True, help="Which stage to run.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     p.add_argument("--log_dir", type=str, default="runs/toyproblem/p2_ablation")
     p.add_argument("--dry_run", action="store_true",
-                   help="Print commands without running.")
+                   help="Print run list without executing.")
+    # Phase 2 winners (defaults are sensible placeholders; update after Phase 2)
+    p.add_argument("--phase2_lambda", type=str, default="1e-3")
+    p.add_argument("--phase2_delta", type=str, default="1.0")
+    p.add_argument("--phase2_z_dim", type=str, default="3")
+    # P2-A winners (required for stages B-F)
+    p.add_argument("--best_K", type=int, default=5)
+    p.add_argument("--best_model_type", type=str, default="factored",
+                   choices=["factored", "joint"])
+    p.add_argument("--best_context", type=str, default="A", choices=["A", "B"])
+    p.add_argument("--best_loss_mode", type=str, default="entropy",
+                   choices=["entropy", "both"])
+    # P2-B winners (required for stages C-F)
+    p.add_argument("--best_lambda", type=str, default="1e-3")
+    # P2-C winners (required for stages D-F)
+    p.add_argument("--best_z_dim", type=str, default="3")
+    # P2-D winners (required for stages E-F)
+    p.add_argument("--best_delta", type=str, default="1.0")
     args = p.parse_args()
 
-    conditions = list(_ablation_grid())
-    n_runs = len(conditions) * len(args.seeds)
-    print(f"P2 ablation: {len(conditions)} conditions × {len(args.seeds)} seeds = {n_runs} runs")
-
-    for i, (exp_name, extra) in enumerate(conditions):
-        for seed in args.seeds:
-            if args.dry_run:
-                print(f"  [{i}] {exp_name} seed={seed} extra={extra}")
-            else:
-                _run(exp_name, seed, args.log_dir, extra)
-
-    print("Done.")
+    stages = list(_STAGE_FNS.keys()) if args.stage == "all" else [args.stage]
+    for stage in stages:
+        conditions = list(_STAGE_FNS[stage](args))
+        n_runs = len(conditions) * len(args.seeds)
+        print(f"\n=== {stage}: {len(conditions)} conditions × {len(args.seeds)} seeds = {n_runs} runs ===")
+        for i, (exp_name, extra) in enumerate(conditions):
+            for seed in args.seeds:
+                if args.dry_run:
+                    print(f"  [{i}] {exp_name} seed={seed}")
+                else:
+                    _run(exp_name, seed, args.log_dir, extra)
+    print("\nDone.")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Verify dry run output**
+- [ ] **Step 2: Verify dry run for each stage**
 
+```bash
+for stage in P2-A P2-B P2-C P2-D P2-E P2-F; do
+    echo "=== $stage ==="
+    KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+        python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \
+        --stage $stage --seeds 0 1 --dry_run \
+        --best_K 5 --best_model_type factored --best_context A \
+        --best_loss_mode entropy --best_lambda 4e-3 \
+        --best_z_dim 3 --best_delta 1.0 2>&1 | head -5
+done
 ```
+
+Expected: each stage prints its condition list (no errors, no actual runs).
+
+- [ ] **Step 3: Verify total run count**
+
+```bash
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \
-    --seeds 0 1 --dry_run 2>&1 | head -20
+    --stage all --seeds 0 1 2 3 4 --dry_run \
+    --best_K 5 --best_model_type factored --best_context A \
+    --best_loss_mode entropy --best_lambda 4e-3 \
+    --best_z_dim 3 --best_delta 1.0 2>&1 | grep "runs ==="
 ```
 
-Expected: prints a list of conditions without running anything.
+Expected output lines (approximately):
+```
+=== P2-A: 33 conditions × 5 seeds = 165 runs ===
+=== P2-B:  7 conditions × 5 seeds =  35 runs ===
+=== P2-C:  8 conditions × 5 seeds =  40 runs ===
+=== P2-D:  8 conditions × 5 seeds =  40 runs ===
+=== P2-E:  4 conditions × 5 seeds =  20 runs ===
+=== P2-F: 12 conditions × 5 seeds =  60 runs ===
+```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add onpolicy/envs/toyproblem/experiments/run_p2_ablation.py
-git commit -m "feat(p2): add run_p2_ablation.py orchestrating full ablation grid"
+git commit -m "feat(p2): add 6-stage systematic ablation runner (395 total runs)"
 ```
 
 ---
@@ -1885,21 +2190,28 @@ git commit -m "docs(p2): mark P2 implementation complete; update PLAN.md and ses
 ## Self-Review Checklist
 
 **Spec coverage:**
-- [x] §2 Prior family (DLM) — Tasks 1–3
+- [x] §2 Prior family (DLM) — Tasks 1–3b
 - [x] §2 Factored vs joint — Tasks 1–2
 - [x] §2 TC looseness bound — Task 4
-- [x] §3 Context A/B — Tasks 1, 3, 5
+- [x] §3 Context A/B — Tasks 1, 2, 3, 3b; full 2×2 (factored/joint) × (A/B) — all 4 cells
 - [x] §4 Ballé gradient path (fwd + bwd) — Task 6
 - [x] §5 Unbounded m (DLM tails, wide init) — Task 1 (log_s=1 init)
 - [x] §6 Moving target (lr_qphi, n_qphi_steps, warmup) — Tasks 5, 7, 8
 - [x] §7 All 7 metrics — Task 6
 - [x] §8 qphi_sharing — NOT implemented (deferred; toy problem has 1 speaker so per_agent=shared)
 - [x] §9 Failure modes — diagnostics are the metrics; no code change needed
-- [x] §10 Ablation grid — Task 10
+- [x] §10 Staged ablation (P2-A through P2-F, 395 runs) — Task 10
 - [x] §11 Implementation plan steps — all covered
 
 **qphi_sharing gap:** The spec lists `qphi_sharing ∈ {per_agent, shared}` as a CLI flag. Deferred — in the toy problem there is 1 speaker so both modes are equivalent. Add when implementing a multi-agent environment.
 
-**Type consistency:** `EntropyModelFactored.nll_bits(x)`, `EntropyModelJoint.nll_bits(x)`, `EntropyModelCondZ.nll_bits(x, z)` — used consistently in trainer Tasks 6 and 7.
+**Type consistency:**
+- `EntropyModelFactored.nll_bits(x)` — context A, factored
+- `EntropyModelJoint.nll_bits(x)` — context A, joint
+- `EntropyModelCondZ.nll_bits(x, z)` — context B, factored
+- `EntropyModelJointCondZ.nll_bits(x, z)` — context B, joint
+All four used consistently in trainer Tasks 5–7.
 
 **Context B backward loss note:** In Task 6 the backward loss for Context B uses `z_over_delta` as `x` and `z_new.detach()` as context. This is correct: z_over_delta has grad (flows to speaker), and we detach z_new as context to avoid a second grad path through context.
+
+**Stage ordering note:** P2-A can run immediately after smoke test (Task 9). P2-B requires reading P2-A results and picking winner flags. P2-C through P2-F each require reading results from all prior stages. Do NOT pass stale defaults — update `--best_*` flags from actual sweep results.

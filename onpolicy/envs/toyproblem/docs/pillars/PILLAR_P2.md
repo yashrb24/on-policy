@@ -207,35 +207,148 @@ For the toy problem (1 speaker), all three are equivalent. Implement `per_agent`
 
 ---
 
-## 10. Ablation Matrix
+## 10. Ablation Matrix — Staged Design
 
 All ablations produce 5-seed runs, compared on `(success_rate, entropy_rate, qphi_gap)` with bootstrap CI.
 
-### Primary ablations (P2 core)
+**Execution order matters**: each stage fixes winners from prior stages. Run P2-A first; do not run P2-C through P2-F until P2-A and P2-B are complete.
 
-| Axis | Values |
-|------|--------|
-| `K` (mixture components) | 1, 3, 5, 10, 20 |
-| `context` | A (primary), B (ablation), C (ablation) |
-| `model` | factored, joint |
-| `loss_comms_mode` | `entropy` (P2 only), `both` (P2 + magnitude surrogate) |
+**Total runs: ~395** across all stages.
 
-### Interaction ablations
+---
 
-| Axis | Values |
-|------|--------|
-| `qphi_sharing` | `per_agent`, `shared` |
-| `lr_qphi` (as multiple of `lr_actor`) | 1×, 5×, 10×, 50× |
-| `n_qphi_steps` | 1, 3, 5, 10 |
-| `n_warmup_steps` | 0, 1000, 5000, 20000 |
+### Stage P2-A — Model selection (165 runs)
 
-### Comparison baselines
+**Fixed:** `channel=sd`, `delta=Phase2_best`, `z_dim=Phase2_best`, `lambda_comms=Phase2_winner`
 
-- Baseline DDCL (magnitude surrogate, `λ_comms = baseline_best`)
-- P2-A factored K=5 (primary P2)
-- P2-A joint K=5
-- P2-B factored K=5 (oracle, supplementary)
-- P2-C factored K=5 (oracle, supplementary)
+**Purpose:** Identify best `(K, model_type, context, loss_comms_mode)` combination. Answers: does joint beat factored? Does context B meaningfully tighten the bound? How many mixture components are needed?
+
+**The four model cells** form a 2×2 of (independence assumption) × (conditioning):
+
+| | No z conditioning (deploy-realistic) | Conditioned on z (oracle) |
+|---|---|---|
+| **Factored** | `EntropyModelFactored` — Context A | `EntropyModelCondZ` — Context B |
+| **Joint (AR)** | `EntropyModelJoint` — Context A | `EntropyModelJointCondZ` — Context B |
+
+The (joint, B) cell closes the 2×2 and is the tightest possible bound (autoregressive + z-conditioned). Context C (conditioned on speaker hidden state h) is deferred — requires refactoring `SpeakerNetwork` to expose intermediate activations.
+
+**Grid:**
+
+| Group | K | model_type | context | loss_comms_mode | Configs |
+|-------|---|-----------|---------|----------------|---------|
+| baseline | — | — | — | magnitude | 1 |
+| factored × A | {1,3,5,10,20} | factored | A | {entropy, both} | 10 |
+| joint × A | {1,3,5,10,20} | joint | A | {entropy, both} | 10 |
+| factored × B | {1,3,5,10,20} | factored | B | {entropy, both} | 10 |
+| joint × B | {5} | joint | B | {entropy, both} | 2 |
+
+Note: K ablation is skipped for (joint, B) — the K question is answered by the joint×A and factored×B rows; (joint, B) at K=5 only is sufficient to measure the full-conditioning upper bound.
+
+**Winners:** model_type*, context*, K*, loss_comms_mode* — these fix all subsequent stages.
+
+---
+
+### Stage P2-B — λ re-sweep (70 runs, 35 net-new)
+
+**Fixed:** best config from P2-A, `z_dim=Phase2_best`, `channel=sd`, `delta=Phase2_best`
+
+**Purpose:** The P2 entropy surrogate has a different scale than the magnitude surrogate, so the optimal `lambda_comms` changes. Without this sweep we cannot produce a P2 rate-distortion frontier or make the core claim "P2 lies on a better frontier than baseline." The baseline magnitude sweep (Phase 2 Stage A) already provides 7×5 = 35 comparison runs.
+
+**Grid:**
+
+| λ | baseline_magnitude | P2_best |
+|---|---|---|
+| {1e-5, 1e-4, 5e-4, 1e-3, 4e-3, 1e-2, 3e-2} | (from Phase 2 Stage A) | 35 new runs |
+
+**Winners:** `lambda_best_p2` — fixes all subsequent stages.
+
+---
+
+### Stage P2-C — z_dim interaction (40 runs)
+
+**Fixed:** `K=K*`, `model_type=model_type*`, `context=A`, `loss_comms_mode=entropy`, `lambda=lambda_best_p2`, `channel=sd`, `delta=Phase2_best`
+
+**Purpose:** Total correlation TC is zero at z_dim=1 (factored = joint trivially). At z_dim=2,3 the speaker may learn correlated messages. This stage tests whether the joint model's advantage is larger at higher z_dim, as TC theory predicts. This is the key result for extrapolating to future environments where z_dim will be larger.
+
+**Grid:**
+
+| z_dim | baseline | P2_factored | P2_joint |
+|-------|----------|-------------|---------|
+| 1 | ✓ | ✓ | (= factored, skip) |
+| 2 | ✓ | ✓ | ✓ |
+| 3 | ✓ | ✓ | ✓ |
+
+Total: 8 configs × 5 seeds = 40 runs.
+
+**Expected result:** `tc_bits` at z_dim=1 ≈ 0 (joint ≈ factored); `tc_bits` grows with z_dim; joint closes more of the gap at higher z_dim.
+
+---
+
+### Stage P2-D — δ interaction (40 runs)
+
+**Fixed:** `K=K*`, `model_type=model_type*`, `context=A`, `lambda=lambda_best_p2`, `z_dim=Phase2_best`, `channel=sd`
+
+**Purpose:** δ controls the quantisation grid width. Small δ → large |m| values → complex m distribution → larger P2 gain (the magnitude surrogate `log₂(|z|/δ + 1)` is proportionally looser). Large δ → m ≈ 0 almost always → near-trivial prior → P2 gain vanishes. This is a testable and paper-worthy prediction.
+
+**Grid:**
+
+| δ | baseline | P2_best |
+|---|----------|---------|
+| {0.5, 1.0, 5.0, 10.0} | ✓ | ✓ |
+
+Total: 8 configs × 5 seeds = 40 runs.
+
+---
+
+### Stage P2-E — Channel interaction (20 runs)
+
+**Fixed:** `K=K*`, `model_type=model_type*`, `context=A`, `lambda=lambda_best_p2`, `z_dim=Phase2_best`, `delta=Phase2_best`
+
+**Purpose:** NSD (non-subtractive) dither has a different quantisation error distribution (TPDF vs uniform). The message distribution `p(m)` under NSD differs from SD at the same δ. P2 should adapt automatically since `q_φ` learns from actual m samples. Confirms P2 is channel-agnostic.
+
+**Grid:**
+
+| channel | baseline | P2_best |
+|---------|----------|---------|
+| sd | ✓ | ✓ |
+| nsd | ✓ | ✓ |
+
+Total: 4 configs × 5 seeds = 20 runs.
+
+---
+
+### Stage P2-F — Training robustness (60 runs)
+
+**Fixed:** best model from P2-A, `lambda=lambda_best_p2`, `z_dim=Phase2_best`, `delta=Phase2_best`, `channel=sd`
+
+**Purpose:** Characterise sensitivity to training hyperparameters. The ranges found here directly inform what to use in future (more complex) environments, where the moving target problem is harder.
+
+**One-at-a-time (OAT) around the P2 defaults:**
+
+| Axis | Values tested | Other axes |
+|------|--------------|------------|
+| `lr_qphi_mult` | {1, 5, 10, 50} | n_qphi_steps=3, n_warmup=5000 |
+| `n_qphi_steps` | {1, 3, 5, 10} | lr_qphi_mult=10, n_warmup=5000 |
+| `n_warmup_steps` | {0, 1000, 5000, 20000} | lr_qphi_mult=10, n_qphi_steps=3 |
+
+Total: 12 configs × 5 seeds = 60 runs.
+
+**Key diagnostic:** `qphi_gap` over training — should converge to near-zero. Large `qphi_gap` at low `n_qphi_steps` or `lr_qphi_mult` identifies the moving-target boundary.
+
+---
+
+### Extrapolation to main environments
+
+After all 6 stages, the following facts will be established for the toy problem:
+
+| Finding | Extrapolation |
+|---------|--------------|
+| Best K (e.g., K=5 sufficient) | Use K=5 as default; increase only if `qphi_gap` remains large |
+| factored vs joint threshold (e.g., joint helps at z_dim≥2 when TC>0.1 bits) | Use joint when z_dim>2 in new envs |
+| Optimal `lr_qphi_mult` range (e.g., 5–20×) | Use same range in new envs; scale n_qphi_steps with env complexity |
+| P2 gain vs δ (larger gain at small δ) | Tune δ to sit in the regime where P2 helps |
+| P2 works for NSD as well as SD | Safe to combine P2 with P3 (TPDF dithering) |
+| context A ≈ context B gap size | If gap is large, consider context B for environments where z is accessible at train time |
 
 ---
 
