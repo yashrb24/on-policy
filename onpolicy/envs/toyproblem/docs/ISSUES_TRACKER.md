@@ -18,6 +18,42 @@
 
 ---
 
+## Pre-existing / Out-of-scope Issues
+
+These are upstream bugs in the shared `on-policy` repository. They were found during Phase 0/1 audits. They are **not** caused by this project and are **not** in scope for the DDCL toyproblem work. They are catalogued here so future work on other environments does not trip over them.
+
+### [UPSTREAM-001] PredatorPrey: No step-count enforcement
+- **File:** `onpolicy/envs/predator_prey/PredatorPrey_env.py`
+- **Symptom:** Environment only sets `episode_over = True` on prey capture; it does not enforce `max_steps`. Episodes run indefinitely across rollout boundaries until capture, making win-rate logging at rollout boundaries incorrect.
+- **Impact:** Affects PP-Medium and PP-Hard experiments only. Toyproblem is not affected.
+- **Status:** WONT-FIX (out of scope) — fix when PP experiments are scheduled: add `self.step_count` tracker; set `episode_over = True` when `step_count >= max_steps`; set `bad_masks` at truncation boundaries in the runner.
+
+---
+
+### [UPSTREAM-002] `use_active_masks_in_transformer` flag inconsistency
+- **Files:** `onpolicy/algorithms/utils/transformer_encoder.py`, `onpolicy/scripts/train_pp_scripts/`, `onpolicy/scripts/train_football_scripts/`
+- **Symptom:** Flag implemented in transformer but removed from PP/TJ scripts; Football scripts still reference it. Using it produces inconsistent masking across environments.
+- **Impact:** Multi-agent transformer experiments only. Toyproblem does not use the transformer stack.
+- **Status:** WONT-FIX (out of scope) — fix when MAT experiments are scheduled: either remove flag entirely or consistently enable across all environments.
+
+---
+
+### [UPSTREAM-003] Two separate DDCL code paths never cross-validated
+- **Files:** `onpolicy/algorithms/utils/transformer_encoder.py` vs `onpolicy/envs/toyproblem/channels.py`
+- **Symptom:** Transformer DDCL wires into attention keys/values with `ddcl_variation ∈ {"old","new"}`; toyproblem uses standalone `DDCL_SD`/`DDCL_NSD` classes. Gradient mechanics, loss formulas, and noise-scaling conventions have not been verified to agree.
+- **Impact:** PP/TJ/GRF results and toyproblem results may not be comparable if underlying DDCL maths differ.
+- **Status:** DEFERRED — fix when cross-environment comparison is needed: unify on a single `channels.py` module or write a cross-implementation equivalence test.
+
+---
+
+### [UPSTREAM-004] `fake_quantization` only wired in transformer, not toyproblem
+- **Files:** `onpolicy/algorithms/utils/transformer_encoder.py`, `onpolicy/config.py:350-352`
+- **Symptom:** `--use_fake_quantization` and `--quant_bits` defined in global config but only consumed by the transformer encoder. STE-vs-DDCL comparisons cannot be run on the toyproblem without porting this feature.
+- **Impact:** Phase 2 sweeps include STE as a baseline; this flag would need to be ported to `channels.py` (making it in-scope for Phase 2 if needed, not a pre-existing issue at that point).
+- **Status:** DEFERRED — monitor during Phase 2 STE analysis; port to `channels.py` if STE sweep results are needed.
+
+---
+
 ## Installation Issues
 
 ### [INSTALL-001] `onpolicy` package not on Python path
@@ -137,7 +173,7 @@
 - **Symptom:** `env.seed(seed)` calls both `self.np_random = np.random.RandomState(seed)` AND `np.random.seed(seed)` (the global RNG). The global seed is set as a side effect, which is surprising in a multi-env context.
 - **Root cause:** Original implementation. The vec env's `env.seed()` does not have this issue (sets only instance RNG).
 - **Fix:** `train.py`'s `set_seed()` sets `np.random.seed` before env construction, so the order is consistent in practice. The real fix (remove global side effect from `CommunicatingGoal_env.seed()`) is out of scope.
-- **Status:** DEFERRED (noted in `docs/KNOWN_ISSUES.md` as Issue #6)
+- **Status:** DEFERRED — low-priority; seeding order in `train.py` is correct in practice. Real fix: remove `np.random.seed(seed)` call from `CommunicatingGoal_env.seed()`.
 - **Reproducibility impact:** LOW in practice (seeding order in `train.py` is correct), but could cause surprises in multi-process contexts.
 
 ---
