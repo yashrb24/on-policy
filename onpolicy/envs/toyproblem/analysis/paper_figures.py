@@ -1118,3 +1118,218 @@ def generate_all_paper_figures(
                     print(f"  fig10 ({ch}, z={zdim}) FAILED: {e}")
 
     print(f"\nAll figures attempted. Check {out_dir}/")
+
+
+# ---------------------------------------------------------------------------
+# P2 Figures — Entropy Model
+# ---------------------------------------------------------------------------
+
+def plot_p2_entropy_rate_vs_lambda(
+    agg: pd.DataFrame,
+    K_values: Sequence[int] = (1, 3, 5, 10, 20),
+    save_path: str | Path | None = None,
+) -> tuple:
+    """
+    Hypothesis
+    ----------
+    Higher K (mixture components) in the DLM prior reduces entropy_rate (cross-entropy
+    approaches H(m)) and improves success_rate at the same lambda_comms.
+
+    Analysis
+    --------
+    Line plots of entropy_rate_mean vs lambda_comms for each K value (Context A,
+    factored). Shaded band = bootstrap CI. A horizontal dashed line marks the
+    baseline magnitude surrogate (bits_per_msg from baseline_magnitude run).
+
+    Conclusion
+    ----------
+    If K=5 matches K=10/20, the mixture is expressive enough; K=1 (Gaussian)
+    is the simplest useful special case.
+    """
+    _require_mpl()
+    _paper_style()
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    cmap = cm.get_cmap("viridis", len(K_values))
+    for i, K in enumerate(K_values):
+        mask = agg["entropy_model_K"] == K
+        sub = agg[mask].sort_values("lambda_comms")
+        if sub.empty:
+            continue
+        axes[0].plot(
+            sub["lambda_comms"], sub["entropy_rate_mean"],
+            color=cmap(i), label=f"K={K}",
+        )
+        if "entropy_rate_ci_lo" in sub.columns:
+            axes[0].fill_between(
+                sub["lambda_comms"],
+                sub["entropy_rate_ci_lo"], sub["entropy_rate_ci_hi"],
+                color=cmap(i), alpha=0.15,
+            )
+        axes[1].plot(
+            sub["lambda_comms"], sub["success_rate_mean"],
+            color=cmap(i), label=f"K={K}",
+        )
+
+    for ax in axes:
+        ax.set_xlabel("λ (lambda_comms)")
+        ax.legend(title="Mixture K")
+        ax.set_xscale("log")
+    axes[0].set_ylabel("Entropy rate (bits/msg)")
+    axes[0].set_title("Cross-entropy vs λ")
+    axes[1].set_ylabel("Success rate")
+    axes[1].set_title("Task success vs λ")
+    fig.suptitle("P2: DLM mixture components ablation (Context A, factored)")
+    fig.tight_layout()
+    _save(fig, save_path)
+    return fig, axes
+
+
+def plot_p2_qphi_gap_training(
+    df: pd.DataFrame,
+    exp_names: Sequence[str] | None = None,
+    save_path: str | Path | None = None,
+) -> tuple:
+    """
+    Hypothesis
+    ----------
+    qphi_gap (cross-entropy − empirical H(m)) decreases over training as q_φ
+    converges to the true message distribution. Wide-scale initialisation
+    prevents early collapse.
+
+    Analysis
+    --------
+    Training curves of qphi_gap over timesteps, one line per exp_name seed-mean.
+    Shaded band = ±1 seed std. A dashed line at 0 marks perfect fit.
+
+    Conclusion
+    ----------
+    If qphi_gap converges toward 0 and stays there, q_φ is tracking p(m) well.
+    Spikes indicate warm-start distribution shift (see PILLAR_P2.md §9).
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    if exp_names is None:
+        exp_names = df["exp_name"].unique().tolist() if "exp_name" in df.columns else []
+
+    for exp in exp_names:
+        sub = df[df["exp_name"] == exp] if "exp_name" in df.columns else df
+        if "qphi_gap" not in sub.columns:
+            continue
+        grouped = sub.groupby("timestep")["qphi_gap"]
+        mean = grouped.mean()
+        std = grouped.std()
+        ax.plot(mean.index, mean.values, label=exp)
+        ax.fill_between(mean.index, mean - std, mean + std, alpha=0.15)
+
+    ax.axhline(0, linestyle="--", color="black", linewidth=1, label="perfect fit")
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("qphi_gap (bits)")
+    ax.set_title("P2: q_φ convergence diagnostic")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    _save(fig, save_path)
+    return fig, ax
+
+
+def plot_p2_factored_vs_joint(
+    agg: pd.DataFrame,
+    save_path: str | Path | None = None,
+) -> tuple:
+    """
+    Hypothesis
+    ----------
+    Joint autoregressive DLM achieves lower entropy_rate than factored DLM when
+    message dimensions are correlated (tc_bits > 0), but at higher computational cost.
+
+    Analysis
+    --------
+    Scatter of (entropy_rate_mean, success_rate_mean) for factored vs joint K=5,
+    Context A. Annotated with tc_bits value to show when dimensions are correlated.
+
+    Conclusion
+    ----------
+    If tc_bits ≈ 0, factored = joint. If tc_bits > 0, joint should have strictly
+    lower entropy_rate (the improvement equals tc_bits by TC decomposition).
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    colors = {"factored": "#1f77b4", "joint": "#ff7f0e"}
+    for model_type, color in colors.items():
+        if "entropy_model_type" not in agg.columns:
+            continue
+        sub = agg[agg["entropy_model_type"] == model_type]
+        if sub.empty:
+            continue
+        ax.scatter(
+            sub["entropy_rate_mean"], sub["success_rate_mean"],
+            color=color, label=model_type, s=60, alpha=0.8,
+        )
+
+    ax.set_xlabel("Entropy rate (bits/msg)")
+    ax.set_ylabel("Success rate")
+    ax.set_title("P2: Factored vs joint DLM (K=5, Context A)")
+    ax.legend()
+    fig.tight_layout()
+    _save(fig, save_path)
+    return fig, ax
+
+
+def plot_p2_context_comparison(
+    agg: pd.DataFrame,
+    save_path: str | Path | None = None,
+) -> tuple:
+    """
+    Hypothesis
+    ----------
+    entropy_rate_A ≥ entropy_rate_B ≥ H(m). The gap A−B quantifies I(z; m).
+
+    Analysis
+    --------
+    Box plots (or bar plots with error bars) of entropy_rate for contexts A and B
+    (K=5, factored). A horizontal dashed line at H_m_empirical mean shows the
+    theoretical minimum.
+
+    Conclusion
+    ----------
+    A small gap A−B means z carries little extra information about m beyond the
+    marginal distribution — Context A is nearly optimal.
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(5, 4))
+
+    contexts = ["A", "B"]
+    colors = {"A": "#1f77b4", "B": "#ff7f0e"}
+    x_pos = list(range(len(contexts)))
+    for i, ctx in enumerate(contexts):
+        if "entropy_model_context" not in agg.columns:
+            continue
+        sub = agg[agg["entropy_model_context"] == ctx]
+        if sub.empty:
+            continue
+        er = sub["entropy_rate_mean"]
+        ci_lo = sub.get("entropy_rate_ci_lo", er)
+        ci_hi = sub.get("entropy_rate_ci_hi", er)
+        ax.bar(i, er.mean(), color=colors[ctx], label=f"Context {ctx}", alpha=0.8)
+        ax.errorbar(i, er.mean(),
+                    yerr=[[er.mean() - ci_lo.mean()], [ci_hi.mean() - er.mean()]],
+                    color="black", capsize=5)
+
+    # H(m) reference line
+    if "H_m_empirical_mean" in agg.columns:
+        h_emp = agg["H_m_empirical_mean"].mean()
+        ax.axhline(h_emp, linestyle="--", color="black", label="H(m) empirical")
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([f"Context {c}" for c in contexts])
+    ax.set_ylabel("Entropy rate (bits/msg)")
+    ax.set_title("P2: Rate bound tightness by conditioning context")
+    ax.legend()
+    fig.tight_layout()
+    _save(fig, save_path)
+    return fig, ax
