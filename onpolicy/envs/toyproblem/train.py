@@ -94,6 +94,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ste_clip", type=float, default=10.0,
                    help="Clip bound for STE channels (ste4/ste8/ste16).")
 
+    # P2 — Entropy model
+    p.add_argument("--use_entropy_model", action="store_true",
+                   help="Enable P2 entropy model (DLM prior q_φ).")
+    p.add_argument("--entropy_model_K", type=int, default=5,
+                   help="Number of mixture components in DLM prior.")
+    p.add_argument("--entropy_model_type", type=str, default="factored",
+                   choices=["factored", "joint"],
+                   help="factored: independent per-dim DLM. joint: autoregressive DLM.")
+    p.add_argument("--entropy_model_context", type=str, default="A",
+                   choices=["A", "B"],
+                   help="A: marginal prior (deployment-realistic). B: conditioned on z (oracle).")
+    p.add_argument("--lr_qphi_mult", type=float, default=10.0,
+                   help="q_φ learning rate = lr_qphi_mult × --lr.")
+    p.add_argument("--n_qphi_steps", type=int, default=3,
+                   help="q_φ gradient steps per RL minibatch.")
+    p.add_argument("--n_warmup_steps", type=int, default=5000,
+                   help="q_φ warm-start gradient steps before RL begins.")
+    p.add_argument("--loss_comms_mode", type=str, default="magnitude",
+                   choices=["magnitude", "entropy", "both"],
+                   help="magnitude: baseline Jensen surrogate. "
+                        "entropy: P2 DLM rate. both: sum of both.")
+
     # Logging
     p.add_argument("--log_dir", type=str, default="runs",
                    help="Root log directory. Actual path: <log_dir>/<exp_name>/<seed>/")
@@ -134,13 +156,18 @@ def _setup_log_dir(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-_N_GOALS = len(_DEFAULT_GOALS)  # 6
+_N_GOALS = len(_DEFAULT_GOALS)  # should be 6
+
+_P2_COLS = [
+    "entropy_rate", "H_m_empirical", "qphi_gap",
+    "tc_bits", "qphi_neg_log_max", "bits_vs_magnitude",
+] + [f"entropy_rate_goal_{i}" for i in range(_N_GOALS)]
 
 CSV_HEADER = [
     "update", "timestep", "mean_reward", "success_rate",
     "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
     "comms_loss", "bits_per_msg", "true_bits_per_msg", "z_norm", "sps",
-] + [f"bits_goal_{i}" for i in range(_N_GOALS)]
+] + [f"bits_goal_{i}" for i in range(_N_GOALS)] + _P2_COLS
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +205,14 @@ def main() -> None:
         delta=args.delta,
         lambda_comms=args.lambda_comms,
         ste_clip=args.ste_clip,
+        use_entropy_model=args.use_entropy_model,
+        entropy_model_K=args.entropy_model_K,
+        entropy_model_type=args.entropy_model_type,
+        entropy_model_context=args.entropy_model_context,
+        lr_qphi_mult=args.lr_qphi_mult,
+        n_qphi_steps=args.n_qphi_steps,
+        n_warmup_steps=args.n_warmup_steps,
+        loss_comms_mode=args.loss_comms_mode,
     )
     trainer = MAPPOTrainer(config, device=device)
     buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
@@ -185,6 +220,43 @@ def main() -> None:
     n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
 
     obs = env.reset()
+
+    # q_φ warm-start: collect one rollout then run pre-training steps.
+    if args.use_entropy_model and args.n_warmup_steps > 0:
+        buffer.reset()
+        _obs = obs
+        for _ in range(args.n_steps):
+            _goal_np, _lp_np = _obs
+            _goal = torch.from_numpy(_goal_np).to(device)
+            _lp = torch.from_numpy(_lp_np).to(device)
+            _action, _log_prob, _value = trainer.act_and_value(_goal, _lp)
+            _next_obs, _reward, _done, _info = env.step(_action.cpu().numpy())
+            _reward_shared = _reward[:, 0, 0]
+            _done_shared = _done[:, 0]
+            _goal_ids_np = np.array(
+                [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in _goal_np],
+                dtype=np.int64,
+            )
+            buffer.insert(
+                _goal, _lp, _action, _log_prob, _value,
+                torch.from_numpy(_reward_shared).to(device),
+                torch.from_numpy(_done_shared.astype(np.float32)).to(device),
+                goal_id=torch.from_numpy(_goal_ids_np).to(device),
+            )
+            _obs = _next_obs
+        # Use last obs to compute bootstrap value for the warm-start buffer.
+        _goal_np, _lp_np = _obs
+        _goal = torch.from_numpy(_goal_np).to(device)
+        _lp = torch.from_numpy(_lp_np).to(device)
+        _last_value = trainer.get_value(_goal, _lp)
+        buffer.compute_returns_and_advantages(
+            _last_value, trainer.value_norm, args.gamma, args.gae_lambda
+        )
+        # Restore obs for the main loop (continue from where warm-start left off).
+        obs = _obs
+        warmup_loss = trainer.warmup_entropy_model(buffer, args.n_warmup_steps)
+        print(f"[warmup] q_φ pre-training done. final_loss={warmup_loss:.4f}")
+
     recent_rewards: deque[float] = deque(maxlen=200)
     recent_successes: deque[int] = deque(maxlen=200)
 
@@ -242,13 +314,21 @@ def main() -> None:
         per_goal_bits = [
             metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
         ]
+        p2_vals = [
+            metrics.get("entropy_rate", float("nan")),
+            metrics.get("H_m_empirical", float("nan")),
+            metrics.get("qphi_gap", float("nan")),
+            metrics.get("tc_bits", float("nan")),
+            metrics.get("qphi_neg_log_max", float("nan")),
+            metrics.get("bits_vs_magnitude", float("nan")),
+        ] + [metrics.get(f"entropy_rate_goal_{i}", float("nan")) for i in range(_N_GOALS)]
         csv_writer.writerow([
             update, timestep, mean_reward, success_rate,
             metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
             metrics["approx_kl"], metrics["clip_frac"],
             metrics["comms_loss"], metrics["bits_per_msg"],
             metrics["true_bits_per_msg"], metrics["z_norm"], sps,
-        ] + per_goal_bits)
+        ] + per_goal_bits + p2_vals)
         csv_file.flush()
 
         if update % args.log_every == 0 or update == n_updates - 1:
