@@ -79,6 +79,8 @@ where entropies are estimated from histogram counts. TC = 0 if and only if all d
 
 **Implementation plan:** implement factored first. Implement joint as a separate `EntropyModelJoint` class that wraps the autoregressive MLP. Compare in ablation study.
 
+**V4 empirical confirmation (test_v4_tc_identity_factored_minus_joint):** Trained both factored and joint models on perfectly-correlated synthetic data (m₀ = m₁). Observed factored−joint NLL gap ≈ TC + ε_DLM, where ε_DLM ≈ 0.27 bits/dim is the irreducible DLM approximation error (see §5 and `docs/MATH.md §11`). The TC identity holds; the extra offset is a known DLM floor, not a bug. **Practical implication:** use `tc_bits` (empirical histogram estimate) rather than the factored−joint NLL gap for model selection — the NLL gap includes ε_DLM noise that is absent from `tc_bits`.
+
 ---
 
 ## 3. Context Conditioning Options
@@ -142,6 +144,8 @@ Total pillar loss: `L_P2 = λ_ent · (loss_ent_fwd + loss_ent_bwd)` (both contri
 
 **Gradient clipping:** already present in the trainer. Monitor `qphi_neg_log_max` metric (see §7) to detect tail spikes early.
 
+**DLM approximation floor (V2 empirical finding):** DLM cannot represent bounded-support distributions exactly because it assigns non-zero probability mass to all integers. For a distribution with true support of cardinality N, DLM leaks ~9% of its probability mass outside that support, producing an irreducible NLL gap above H(P) of approximately **0.27 bits/dim**. This means `qphi_gap` (defined in §7) will never reach true zero — the expected floor is `≈ 0.27 × z_dim` bits. A `qphi_gap` persistently above this floor indicates a training problem; a gap near the floor indicates the model has converged. See `docs/MATH.md §11` (V2) for the derivation and tolerance analysis.
+
 ---
 
 ## 6. The Moving Target Problem
@@ -161,6 +165,8 @@ As the speaker policy improves, `p(m)` changes. `q_φ` must track a non-stationa
 
 **Warm-start distribution shift risk:** after warm-start, the RL policy may quickly move away from the warm-start distribution. Monitor `qphi_gap` (§7) to detect stale priors; if it grows post-warm-start, increase `n_qphi_steps`.
 
+**V3 empirical finding — warm-start is necessary, not just convenient:** A q_φ trained only on a narrow distribution (e.g., all-zeros messages) assigns probability < 1e-10 to messages outside that support. When the Ballé backward loss evaluates `q_φ(z/δ)` for z/δ values in the dead region, the probability hits the numerical clamp and the gradient is exactly zero — the speaker receives no learning signal. This is not a rounding issue; it is a fundamental consequence of the logistic mixture's very narrow tails after premature convergence. `n_warmup_steps ≥ 5000` ensures q_φ has seen a broad enough message distribution before RL begins, preventing gradient silence from day 1. The `n_warmup_steps=0` case is expected to fail silently (training appears to run, but speaker gradient is zero). See `docs/MATH.md §11` (V3) and §9 below for the failure mode entry.
+
 ---
 
 ## 7. Metrics
@@ -178,6 +184,8 @@ All new metrics are logged to `metrics.csv` per step in addition to the existing
 | `entropy_rate_goal_{i}` | Per-goal `entropy_rate` | Adaptive rate allocation analysis |
 
 **Per-goal entropy rate:** computed by masking the rollout buffer by `goal_id` (already logged in Phase 1 infrastructure).
+
+**qphi_gap floor:** `qphi_gap` is not expected to reach zero. The DLM approximation floor is ≈ 0.27 bits/dim (see §5). Expected minimum: `qphi_gap_floor ≈ 0.27 × z_dim`. A gap near this floor indicates convergence; a gap more than ~0.5 bits above this floor after warm-start indicates a training problem (stale prior, insufficient `n_qphi_steps`, or `lr_qphi_mult` too low). Do **not** use `qphi_gap` alone for factored-vs-joint model selection; use `tc_bits` instead (see §2).
 
 ---
 
@@ -204,6 +212,7 @@ For the toy problem (1 speaker), all three are equivalent. Implement `per_agent`
 | **Gradient explosion** | `qphi_neg_log_max` spikes; NaN in actor loss | Rare large m values; log_s too small | Widen scale init; clip gradients (already in place) |
 | **Warm-start distribution shift** | `qphi_gap` low during warm-start, spikes after RL begins | q_φ stale relative to new policy | Increase `n_qphi_steps`; reduce warm-start length |
 | **Dimension collapse** | All z_k → same value; `tc_bits` → 0 but `entropy_rate` not reduced | Speaker finds degenerate solution | Monitor per-dimension entropy; check z variance per dimension |
+| **Gradient dead zone** | Speaker entropy does not decrease; `entropy_rate` flat despite λ_ent > 0 | q_φ assigns probability < 1e-10 to current messages; Ballé backward gradient is exactly 0; happens when warm-start is skipped or too short | Ensure `n_warmup_steps ≥ 5000`; verify warm-start data covers the actual message support; diagnose by checking `qphi_neg_log_max` > 30 bits at training start |
 
 ---
 
