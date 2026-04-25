@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Categorical
@@ -258,3 +259,48 @@ class EntropyModelJointCondZ(nn.Module):
 
     def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x, z) / math.log(2)
+
+
+# ---------------------------------------------------------------------------
+# Empirical entropy utilities (no-grad, batch-level estimates)
+# ---------------------------------------------------------------------------
+
+def _marginal_entropy_bits_1d(m_col: torch.Tensor) -> float:
+    """Empirical H(m_k) in bits from a 1D integer tensor."""
+    m_np = m_col.detach().cpu().numpy().astype(int).ravel()
+    _, counts = np.unique(m_np, return_counts=True)
+    probs = counts / counts.sum()
+    return float(-(probs * np.log2(probs + 1e-12)).sum())
+
+
+def joint_entropy_bits(m: torch.Tensor) -> float:
+    """Empirical joint entropy H(m_1,...,m_K) in bits.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) — integer-valued
+    """
+    if m.ndim == 1 or m.shape[-1] == 1:
+        return _marginal_entropy_bits_1d(m)
+    m_np = m.detach().cpu().numpy().astype(int)
+    _, counts = np.unique(m_np, axis=0, return_counts=True)
+    probs = counts / counts.sum()
+    return float(-(probs * np.log2(probs + 1e-12)).sum())
+
+
+def total_correlation_bits(m: torch.Tensor) -> float:
+    """Empirical total correlation TC = Σ_k H(m_k) − H(m) in bits.
+
+    Non-negative; equals 0 iff all dimensions are mutually independent.
+    For z_dim=1 always returns 0.0.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) — integer-valued
+    """
+    if m.ndim == 1 or m.shape[-1] == 1:
+        return 0.0
+    marginal_sum = float(sum(
+        _marginal_entropy_bits_1d(m[:, k]) for k in range(m.shape[-1])
+    ))
+    return max(0.0, marginal_sum - joint_entropy_bits(m))

@@ -207,3 +207,39 @@ class TestEntropyModelJointCondZ:
         assert x.grad is not None
         for p in model.parameters():
             p.requires_grad_(True)
+
+
+from onpolicy.envs.toyproblem.network import joint_entropy_bits, total_correlation_bits
+
+
+class TestEntropyHelpers:
+    def test_joint_entropy_uniform(self):
+        """4 equiprobable outcomes → H = 2 bits."""
+        m = torch.tensor([[0], [1], [2], [3]] * 250)  # (1000, 1)
+        h = joint_entropy_bits(m)
+        assert abs(h - 2.0) < 0.01
+
+    def test_joint_entropy_deterministic(self):
+        """Deterministic m → H = 0."""
+        m = torch.zeros(100, 3, dtype=torch.long)
+        h = joint_entropy_bits(m)
+        assert h < 1e-6
+
+    def test_tc_independent(self):
+        """Independent dimensions → TC ≈ 0."""
+        torch.manual_seed(0)
+        m = torch.randint(0, 4, (2000, 3))
+        tc = total_correlation_bits(m)
+        assert tc < 0.05
+
+    def test_tc_perfectly_correlated(self):
+        """Perfectly correlated: m_1 = m_0 always → TC > 0."""
+        m0 = torch.randint(0, 4, (1000,))
+        m = torch.stack([m0, m0, m0], dim=-1)  # (1000, 3) — perfect correlation
+        tc = total_correlation_bits(m)
+        # Marginals each have H ≈ 2 bits; joint H ≈ 2 bits → TC ≈ 4 bits
+        assert tc > 3.0
+
+    def test_tc_z_dim_1_is_zero(self):
+        m = torch.randint(0, 8, (500, 1))
+        assert total_correlation_bits(m) == 0.0
