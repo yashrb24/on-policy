@@ -1,6 +1,6 @@
 # Pillar P2 — Entropy Model
 
-**Status:** DESIGN COMPLETE — pending implementation (Phase 3)  
+**Status:** IMPLEMENTATION COMPLETE — ablation runs pending (Phase 3)  
 **Pillar order:** P2 → P1 → P4 → P3 (first to implement)  
 **Paper reference:** "Stochastic Quantisation via Dithering" §Eq. 2
 
