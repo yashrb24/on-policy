@@ -66,3 +66,45 @@ class TestEntropyModelFactored:
         ms = torch.randint(-10, 11, (200, 3)).float()
         nll = model.nll_bits(ms)
         assert torch.isfinite(nll).all()
+
+
+from onpolicy.envs.toyproblem.network import EntropyModelJoint
+
+
+class TestEntropyModelJoint:
+    def test_output_shape(self):
+        model = EntropyModelJoint(z_dim=3, K=5)
+        m = torch.zeros(32, 3)
+        nll = model.nll_bits(m)
+        assert nll.shape == (32, 3)
+
+    def test_z_dim_1_matches_factored(self):
+        """Joint with z_dim=1 should behave identically to factored."""
+        torch.manual_seed(42)
+        factored = EntropyModelFactored(z_dim=1, K=3)
+        joint = EntropyModelJoint(z_dim=1, K=3)
+        # Copy weights from factored into joint dim-0 params
+        with torch.no_grad():
+            joint.log_pi_0.copy_(factored.log_pi[0])
+            joint.mu_0.copy_(factored.mu[0])
+            joint.log_s_0.copy_(factored.log_s[0])
+        m = torch.tensor([[0.0], [1.0], [-1.0], [3.0]])
+        assert torch.allclose(factored.nll_bits(m), joint.nll_bits(m), atol=1e-5)
+
+    def test_nll_positive(self):
+        torch.manual_seed(0)
+        model = EntropyModelJoint(z_dim=3, K=5)
+        m = torch.randn(100, 3).round()
+        nll = model.nll_bits(m)
+        assert (nll >= 0).all()
+
+    def test_grad_flows_through_context(self):
+        """Autoregressive: grad must flow through earlier dimensions."""
+        model = EntropyModelJoint(z_dim=3, K=3)
+        x = torch.randn(8, 3, requires_grad=True)
+        nll = model.nll_bits(x)
+        nll.mean().backward()
+        assert x.grad is not None
+        assert x.grad.shape == (8, 3)
+        # All dimensions should have non-zero grad (context coupling)
+        assert x.grad.abs().sum(dim=0).min().item() > 0

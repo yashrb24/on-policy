@@ -98,3 +98,63 @@ class EntropyModelFactored(nn.Module):
     def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
         """Negative log-likelihood in bits per element: −log₂ q_φ(x)."""
         return -self.log_prob(x) / math.log(2)
+
+
+class EntropyModelJoint(nn.Module):
+    """Autoregressive DLM prior.
+
+    q_φ(m) = q_φ_0(m_0) · ∏_{k=1}^{K-1} q_φ_k(m_k | m_0,...,m_{k-1})
+
+    Each conditional q_φ_k is a DLM whose parameters are produced by a
+    small MLP taking the previous k dimensions as context.
+    For z_dim=1 this reduces to EntropyModelFactored.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # Dimension 0: marginal prior (no conditioning)
+        self.log_pi_0 = nn.Parameter(torch.zeros(K))
+        self.mu_0 = nn.Parameter(torch.zeros(K))
+        self.log_s_0 = nn.Parameter(torch.ones(K))  # wide init
+        # Conditional MLPs: dim k conditioned on dims 0..k-1
+        self.cond_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(k, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for k in range(1, z_dim)
+        ])
+
+    @staticmethod
+    def _dlm_log_prob_1d(
+        x: torch.Tensor,       # (...)
+        log_pi: torch.Tensor,  # (..., K)  or  (K,)
+        mu: torch.Tensor,      # (..., K)  or  (K,)
+        s: torch.Tensor,       # (..., K)  or  (K,)  — positive
+    ) -> torch.Tensor:         # (...)
+        x_e = x.unsqueeze(-1)
+        upper = torch.sigmoid((x_e + 0.5 - mu) / s)
+        lower = torch.sigmoid((x_e - 0.5 - mu) / s)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
+        return torch.logsumexp(log_p_k, dim=-1)
+
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
+        """Log q_φ(x) per dimension. x: (..., z_dim)."""
+        lp = [self._dlm_log_prob_1d(
+            x[..., 0], self.log_pi_0, self.mu_0, self.log_s_0.exp()
+        )]
+        for k, mlp in enumerate(self.cond_mlps, start=1):
+            params = mlp(x[..., :k])           # (..., 3K)
+            log_pi_k = params[..., :self.K]
+            mu_k = params[..., self.K:2 * self.K]
+            # bias log_s output toward wide init (add 1.0 before exp)
+            s_k = (params[..., 2 * self.K:] + 1.0).exp()
+            lp.append(self._dlm_log_prob_1d(x[..., k], log_pi_k, mu_k, s_k))
+        return torch.stack(lp, dim=-1)          # (..., z_dim)
+
+    def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x) / math.log(2)
