@@ -173,6 +173,27 @@ class MAPPOTrainer(nn.Module):
             for mb in buffer.minibatches(self.config.num_minibatches):
                 z_new = self.speaker(mb["goals"])
                 z_hat, ch_info = self.channel(z_new)
+                m = ch_info.get("m")
+
+                # ── Step 1: q_φ forward update BEFORE the RL step ─────────────────
+                # Rationale: updating q_φ first ensures the backward entropy loss
+                # (step 3) uses a prior that has already tracked the current batch's
+                # message distribution, giving a fresher rate signal. Using z_new
+                # from the current minibatch avoids the stale-z problem that arises
+                # when q_φ is updated after the speaker has already been changed.
+                if self.entropy_model is not None and m is not None:
+                    m_float = m.float().detach()
+                    for _ in range(self.config.n_qphi_steps):
+                        if self.config.entropy_model_context == "A":
+                            nll_fwd = self.entropy_model.nll_bits(m_float)
+                        else:  # context B
+                            nll_fwd = self.entropy_model.nll_bits(m_float, z_new.detach())
+                        loss_q = nll_fwd.mean()
+                        self.optim_qphi.zero_grad(set_to_none=True)
+                        loss_q.backward()
+                        self.optim_qphi.step()
+
+                # ── Step 2: RL losses ──────────────────────────────────────────────
                 dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
                 new_logp = dist.log_prob(mb["actions"])
                 entropy = dist.entropy()
@@ -202,43 +223,33 @@ class MAPPOTrainer(nn.Module):
                     if self.config.loss_comms_mode in ("magnitude", "both"):
                         total_loss = total_loss + self.config.lambda_comms * comms_mean
 
-                # P2: entropy model backward loss (speaker gradient)
-                m = ch_info.get("m")
-                if self.entropy_model is not None and m is not None:
-                    if self.config.loss_comms_mode in ("entropy", "both"):
-                        z_over_delta = z_new / self.config.delta
-                        # Freeze q_φ: grad flows to z, not to q_φ params
-                        for p in self.entropy_model.parameters():
-                            p.requires_grad_(False)
-                        if self.config.entropy_model_context == "A":
-                            nll_bwd = self.entropy_model.nll_bits(z_over_delta)
-                        else:  # context B
-                            nll_bwd = self.entropy_model.nll_bits(z_over_delta, z_new.detach())
-                        for p in self.entropy_model.parameters():
-                            p.requires_grad_(True)
-                        loss_ent_bwd = nll_bwd.mean()
-                        total_loss = total_loss + self.config.lambda_comms * loss_ent_bwd
+                # ── Step 3: entropy backward loss — context A ONLY ────────────────
+                # Context B backward is DISABLED: q_φ(m|z) conditions on the very z
+                # that deterministically produces m = round(z/δ), so the model can
+                # trivially achieve NLL ≈ 0 bits without the speaker changing at all.
+                # The backward loss becomes a no-op and provides zero compression
+                # pressure. Context B is valid as a MEASUREMENT tool (forward loss +
+                # metrics) but must never be used for the speaker gradient path.
+                # See docs/pillars/PILLAR_P2.md §4 for the full derivation.
+                if (self.entropy_model is not None and m is not None
+                        and self.config.loss_comms_mode in ("entropy", "both")
+                        and self.config.entropy_model_context == "A"):
+                    z_over_delta = z_new / self.config.delta
+                    # Freeze q_φ: grad flows to z (speaker), not to q_φ params
+                    for p in self.entropy_model.parameters():
+                        p.requires_grad_(False)
+                    nll_bwd = self.entropy_model.nll_bits(z_over_delta)
+                    for p in self.entropy_model.parameters():
+                        p.requires_grad_(True)
+                    total_loss = total_loss + self.config.lambda_comms * nll_bwd.mean()
 
-                # RL optimizer step
+                # ── Step 4: RL optimizer step ──────────────────────────────────────
                 self.optim.zero_grad(set_to_none=True)
                 total_loss.backward()
                 nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                 self.optim.step()
 
-                # P2: q_φ forward update (n_qphi_steps)
-                if self.entropy_model is not None and m is not None:
-                    m_float = m.float().detach()
-                    for _ in range(self.config.n_qphi_steps):
-                        if self.config.entropy_model_context == "A":
-                            nll_fwd = self.entropy_model.nll_bits(m_float)
-                        else:  # context B
-                            nll_fwd = self.entropy_model.nll_bits(m_float, z_new.detach())
-                        loss_q = nll_fwd.mean()
-                        self.optim_qphi.zero_grad(set_to_none=True)
-                        loss_q.backward()
-                        self.optim_qphi.step()
-
-                # Metrics (no_grad)
+                # ── Metrics (no_grad) ──────────────────────────────────────────────
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
                     clip_frac = ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
@@ -267,11 +278,11 @@ class MAPPOTrainer(nn.Module):
                 # P2 metrics
                 if self.entropy_model is not None and m is not None:
                     with torch.no_grad():
-                        m_float = m.float().detach()
+                        m_float_log = m.float().detach()
                         if self.config.entropy_model_context == "A":
-                            nll_log = self.entropy_model.nll_bits(m_float)
+                            nll_log = self.entropy_model.nll_bits(m_float_log)
                         else:
-                            nll_log = self.entropy_model.nll_bits(m_float, z_new.detach())
+                            nll_log = self.entropy_model.nll_bits(m_float_log, z_new.detach())
                         entropy_rate = nll_log.mean().item()
                         qphi_neg_log_max = nll_log.max().item()
                         h_emp = joint_entropy_bits(m.long())

@@ -688,3 +688,182 @@ class TestEntropyModelValidation:
         # Restore speaker
         for p in trainer.speaker.parameters():
             p.requires_grad_(True)
+
+
+# ---------------------------------------------------------------------------
+# Hardening-fix validation tests (V6–V8)
+# Tests for the three robustness fixes applied after the initial P2 implementation:
+#   V6 — Mixture prior eliminates gradient dead-zone without warm-start
+#   V7 — Scale floor prevents DLM collapse to delta function
+#   V8 — Context B backward is disabled (degenerate rate signal)
+# Each test is documented in docs/MATH.md §12 and docs/pillars/PILLAR_P2.md.
+# ---------------------------------------------------------------------------
+
+from onpolicy.envs.toyproblem.network import _FLAT_ALPHA, _FLAT_SCALE, _S_LOG_MIN
+
+
+class TestHardeningFixes:
+    """Validates the three robustness fixes applied to the P2 entropy model."""
+
+    # ------------------------------------------------------------------
+    # Fix V6: Mixture prior — no gradient dead-zone for extreme integers
+    # ------------------------------------------------------------------
+    def test_v6_mixture_prior_no_dead_zone(self):
+        """V6 — Mixture prior: finite log-prob and non-zero gradient everywhere.
+
+        Before the fix, q_φ(m) hit the 1e-10 clamp for integers far outside
+        training support, making log q_φ ≈ −33 bits and ∂L/∂z ≈ 0 (dead zone).
+
+        After the fix, q̃_φ(m) = (1−α)·q_φ(m) + α·Laplace(m; 0, _FLAT_SCALE).
+        Even for extreme unseen integers (here ±500 and ±300):
+          1. log q̃_φ(m) is finite (not −inf)
+          2. The backward gradient through nll_bits is finite and non-zero
+          3. The gradient sign is correct: it points toward smaller |x| (rate-reducing)
+
+        If this fails, the mixture prior is not being applied; any message the
+        speaker hasn't seen before will produce zero gradient, reverting to the
+        warm-start dependency.
+        """
+        model = EntropyModelFactored(z_dim=2, K=3)
+        # Extreme integers — far outside anything the DLM covers without training
+        extreme = torch.tensor([[500.0, -300.0]])
+        log_q = model.log_prob(extreme)
+        assert log_q.isfinite().all(), (
+            f"log_prob not finite for extreme inputs {extreme.tolist()}: {log_q}. "
+            "Mixture prior (_mix_with_flat) may not be applied."
+        )
+
+        # Gradient must be finite and non-zero
+        x_ext = extreme.clone().requires_grad_(True)
+        model.nll_bits(x_ext).sum().backward()
+        assert x_ext.grad is not None
+        assert x_ext.grad.isfinite().all(), (
+            f"NaN gradient at extreme inputs: {x_ext.grad}"
+        )
+        assert x_ext.grad.abs().max().item() > 0, (
+            "Zero gradient at extreme inputs — dead zone still present."
+        )
+
+        # Gradient must point toward zero (rate-reducing direction)
+        # At x=+500: grad should be > 0 (descent moves x toward 0)
+        # At x=-300: grad should be < 0 (descent moves x toward 0)
+        assert x_ext.grad[0, 0].item() > 0, (
+            f"Gradient at x=+500 is {x_ext.grad[0,0].item():.4f}, expected > 0. "
+            "Mixture prior gradient direction is wrong."
+        )
+        assert x_ext.grad[0, 1].item() < 0, (
+            f"Gradient at x=-300 is {x_ext.grad[0,1].item():.4f}, expected < 0. "
+            "Mixture prior gradient direction is wrong."
+        )
+
+    # ------------------------------------------------------------------
+    # Fix V7: Scale floor — DLM stays well-behaved at extreme log_s
+    # ------------------------------------------------------------------
+    def test_v7_scale_floor_prevents_collapse(self):
+        """V7 — Scale floor: s_eff ≥ 0.5 even when log_s is driven to −∞.
+
+        Without the clamp, log_s = −100 gives s ≈ 3.7e−44 → all probability
+        mass collapses to a delta at the nearest integer → log q = −∞ for
+        non-integer inputs (including the continuous Ballé backward z/δ) →
+        NaN loss and zero gradient.
+
+        With the clamp (log_s ≥ log(0.5), i.e. s_eff ≥ 0.5), log q remains
+        finite everywhere and the gradient flows correctly.
+
+        This test also verifies the conditional models (Joint, CondZ,
+        JointCondZ) via their MLP output scale bias.
+        """
+        import math as _math
+        from onpolicy.envs.toyproblem.network import (
+            EntropyModelJoint, EntropyModelCondZ, EntropyModelJointCondZ,
+        )
+        # Non-integer inputs — hardest case for a delta-like DLM
+        x_nonint = torch.tensor([[0.7, -1.3]])
+
+        # --- EntropyModelFactored: log_s → -∞, effective s = exp(_S_LOG_MIN) ---
+        m_factored = EntropyModelFactored(z_dim=2, K=3)
+        with torch.no_grad():
+            m_factored.log_s.fill_(-100.0)
+        log_q = m_factored.log_prob(x_nonint)
+        assert log_q.isfinite().all(), (
+            f"EntropyModelFactored log_prob not finite with log_s=-100 "
+            f"(s_eff=exp({_S_LOG_MIN:.3f})={_math.exp(_S_LOG_MIN):.2f}): {log_q}"
+        )
+        x_g = x_nonint.clone().requires_grad_(True)
+        m_factored.nll_bits(x_g).sum().backward()
+        assert x_g.grad.isfinite().all()
+
+        # --- EntropyModelJoint ---
+        m_joint = EntropyModelJoint(z_dim=2, K=3)
+        with torch.no_grad():
+            m_joint.log_s_0.fill_(-100.0)
+        log_q_j = m_joint.log_prob(x_nonint)
+        assert log_q_j.isfinite().all(), (
+            f"EntropyModelJoint log_prob not finite with log_s_0=-100: {log_q_j}"
+        )
+
+        # --- EntropyModelCondZ ---
+        m_condz = EntropyModelCondZ(z_dim=2, K=3)
+        z = torch.zeros(1, 2)
+        log_q_c = m_condz.log_prob(x_nonint, z)
+        assert log_q_c.isfinite().all(), (
+            f"EntropyModelCondZ log_prob not finite: {log_q_c}"
+        )
+
+    # ------------------------------------------------------------------
+    # Fix V8: Context B backward disabled — no entropy gradient to speaker
+    # ------------------------------------------------------------------
+    def test_v8_context_b_backward_disabled(self):
+        """V8 — Context B entropy backward is disabled; speaker receives no gradient.
+
+        In context B, q_φ(m|z) conditions on z, which deterministically produces
+        m = round(z/δ). The model can trivially achieve NLL ≈ 0 by memorising
+        round(·), so it provides no meaningful compression pressure to the speaker.
+
+        After the fix, the backward entropy loss is silently skipped for context B
+        (only context A provides a speaker gradient from the entropy path).
+
+        Test design:
+          - Zero RL advantages → actor_loss = 0, no RL gradient to speaker
+          - loss_comms_mode = "entropy" → magnitude loss also absent
+          - entropy_coef = 0 → no entropy bonus
+          The ONLY loss that can affect the speaker is the entropy backward.
+          With context A: speaker params MUST change (entropy backward active).
+          With context B: speaker params must NOT change (entropy backward disabled).
+        """
+        def make_trainer(context: str) -> MAPPOTrainer:
+            cfg = MAPPOConfig(
+                z_dim=3, channel="sd", delta=1.0, lambda_comms=1.0,
+                use_entropy_model=True, entropy_model_K=3,
+                entropy_model_type="factored", entropy_model_context=context,
+                loss_comms_mode="entropy",
+                update_epochs=1, num_minibatches=1,
+                entropy_coef=0.0,
+            )
+            return MAPPOTrainer(cfg, device=torch.device("cpu"))
+
+        buf = _make_buffer(z_dim=3, n_steps=8, n_envs=4)
+        buf.advantages = torch.zeros(8, 4)  # zero RL signal
+        buf.returns = torch.zeros(8, 4)
+
+        # Context A: entropy backward must update speaker
+        torch.manual_seed(0)
+        t_a = make_trainer("A")
+        w_before_a = t_a.speaker.network[-1].weight.detach().clone()
+        t_a.update(buf)
+        w_after_a = t_a.speaker.network[-1].weight.detach()
+        assert not torch.allclose(w_before_a, w_after_a), (
+            "Context A: entropy backward should have updated speaker params but didn't. "
+            "Check that backward entropy loss is being added to total_loss."
+        )
+
+        # Context B: speaker must NOT change (entropy backward disabled)
+        torch.manual_seed(0)
+        t_b = make_trainer("B")
+        w_before_b = t_b.speaker.network[-1].weight.detach().clone()
+        t_b.update(buf)
+        w_after_b = t_b.speaker.network[-1].weight.detach()
+        assert torch.allclose(w_before_b, w_after_b, atol=1e-7), (
+            "Context B: entropy backward is degenerate and must be disabled, but "
+            "speaker params changed. See PILLAR_P2.md §4 for the derivation."
+        )

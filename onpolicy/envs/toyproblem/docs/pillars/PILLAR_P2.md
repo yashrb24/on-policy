@@ -127,6 +127,10 @@ Total pillar loss: `L_P2 = λ_ent · (loss_ent_fwd + loss_ent_bwd)` (both contri
 
 **Why this preserves Schuchman's theorem:** The channel forward pass (dithering, quantisation, STE) is not touched. The only change is in the loss term. Quantisation error independence is preserved.
 
+**Context B backward is disabled (implementation fix):** When `entropy_model_context == "B"`, the backward loss is skipped entirely. Context B models `q_φ(m|z)`, but since `m = round(z/δ)` is a deterministic function of z, the model can trivially achieve `NLL = 0` without the speaker changing at all. Evaluating `-log q_φ(z/δ | z_fixed)` with `z_fixed = z.detach()` creates an additional inconsistency: the gradient pushes z toward regions where the OLD z's DLM peaked, not toward genuinely lower-rate messages. **Context B is only valid as a rate measurement tool (forward loss + metrics). Only context A (unconditional marginal) provides a valid backward gradient to the speaker.** See `docs/MATH.md §12` (Fix 3) for the full derivation. Test: `test_v8_context_b_backward_disabled`.
+
+**Update order fix:** The q_φ forward update now runs BEFORE the RL optimizer step. This ensures that when the backward entropy loss is computed (step 3 of each minibatch), q_φ has already tracked the current batch's message distribution. The previous order (q_φ update after RL step) trained q_φ on stale z values from a speaker that had just been modified. Timing: q_φ update → backward loss (frozen q_φ) → RL step.
+
 ---
 
 ## 5. Handling Unbounded Support of m
@@ -145,6 +149,10 @@ Total pillar loss: `L_P2 = λ_ent · (loss_ent_fwd + loss_ent_bwd)` (both contri
 **Gradient clipping:** already present in the trainer. Monitor `qphi_neg_log_max` metric (see §7) to detect tail spikes early.
 
 **DLM approximation floor (V2 empirical finding):** DLM cannot represent bounded-support distributions exactly because it assigns non-zero probability mass to all integers. For a distribution with true support of cardinality N, DLM leaks ~9% of its probability mass outside that support, producing an irreducible NLL gap above H(P) of approximately **0.27 bits/dim**. This means `qphi_gap` (defined in §7) will never reach true zero — the expected floor is `≈ 0.27 × z_dim` bits. A `qphi_gap` persistently above this floor indicates a training problem; a gap near the floor indicates the model has converged. See `docs/MATH.md §11` (V2) for the derivation and tolerance analysis.
+
+**Mixture prior (hardening fix):** All four entropy model classes now use a mixture prior `q̃_φ(x) = (1−α)·q_φ(x) + α·Laplace(x; 0, s_flat)` with α=0.01, s_flat=50. This guarantees `q̃_φ(x) > 0` for all x without requiring warm-start, and provides a small but non-zero gradient at all z/δ values. See `docs/MATH.md §12` (Fix 1). Code: `_FLAT_ALPHA`, `_FLAT_SCALE`, `_mix_with_flat` in `network.py`.
+
+**Scale floor (hardening fix):** DLM scales are clamped to `s_eff ≥ exp(_S_LOG_MIN) = 0.1` before `exp()`. This prevents numerical collapse to a delta function if `log_s → −∞`, AND allows joint models to express sharp conditionals (P ≈ 0.987 per component at the mode). The previous s_min=0.5 would cap conditional probability at 0.46, which breaks the TC identity measured in V4. See `docs/MATH.md §12` (Fix 2). Code: `_S_LOG_MIN` in `network.py`.
 
 ---
 

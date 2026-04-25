@@ -506,3 +506,79 @@ Three of the five validation tests revealed a consistent **DLM approximation err
 | Factored pays ε_DLM per dim, joint pays once | V4 | Model selection based on factored−joint NLL gap overestimates TC by ~0.27 bits; use `tc_bits` (empirical) for model selection instead |
 
 **Consequence for sweep interpretation:** When comparing `entropy_rate` across conditions, expect a baseline floor of ~0.27 bits/dim × z_dim above `H_m_empirical`. A qphi_gap persistently above ~0.3 bits indicates either a non-stationary speaker (p(m) drifts faster than q_φ tracks) or an undertrained q_φ (increase `n_warmup_steps` or `lr_qphi_mult`), not a DLM capacity failure.
+
+---
+
+## 12. P2 Hardening Fixes — Mathematical Basis
+
+Three implementation bugs were identified and fixed after the initial P2 implementation. Each has a precise mathematical basis documented here.
+
+### Fix 1 — Mixture Prior (eliminates gradient dead-zone)
+
+**Problem.** The DLM assigns probability clamp(·, 1e-10) to messages far from any mixture component mean. At the clamp, log q_φ ≈ -33 bits and ∂(-log q_φ)/∂z = -(1/q_φ) · ∂q_φ/∂z ≈ 0 (numerically). The speaker receives no gradient and stops learning for rare but valid messages. Warm-start was the previous mitigation, but it is one-shot and cannot guarantee coverage of the post-RL distribution.
+
+**Fix.** Replace q_φ with a mixture prior:
+
+```
+q̃_φ(x) = (1−α) · q_φ(x)  +  α · Laplace(x; 0, s_flat)
+```
+
+where α = 0.01, s_flat = 50.0 (module constants `_FLAT_ALPHA`, `_FLAT_SCALE` in `network.py`). Implemented as:
+
+```
+log q̃_φ(x) = logaddexp(log q_φ(x) + log(1−α),  −|x|/s_flat − log(2s_flat) + log α)
+```
+
+**Guarantee.** For all x ∈ ℝ:
+```
+q̃_φ(x) ≥ α · Laplace(x; 0, s_flat) = 0.01 · e^{−|x|/50} / 100 > 0
+```
+The Laplace gradient `∂(-log q̃_φ)/∂x ≈ sign(x)/s_flat = sign(x)/50` at extreme x is small but always rate-reducing (points toward smaller |x|). Warm-start is now a useful but non-essential acceleration aid.
+
+**Cost.** Maximum NLL overhead ≤ −log₂(α) ≈ 6.6 bits; practical overhead ≈ 0.02 bits at convergence (learned component dominates).
+
+**Test.** `test_v6_mixture_prior_no_dead_zone` — verifies finite log-prob AND non-zero, direction-correct gradient at x = ±300–500 on an untrained model.
+
+---
+
+### Fix 2 — Scale Floor (prevents DLM collapse to delta function)
+
+**Problem.** `log_s` is an unconstrained parameter. Adam can drive it to −∞, making s → 0. A Logistic(μ, 0) distribution is a delta function at μ: it assigns all mass to integers within one step of μ and exactly zero to others. This causes NaN in log q_φ for non-integer inputs (important for the backward Ballé loss which evaluates at continuous z/δ).
+
+An additional subtlety: with s = 0.5 (the previous clamp), the per-component probability at the mode is only σ(1)−σ(−1) ≈ 0.462. For joint autoregressive models, this cap prevents the conditional from expressing P(m_k|m_{<k}) > 0.46 regardless of training, breaking the TC identity (V4 test).
+
+**Fix.** Clamp `log_s ≥ _S_LOG_MIN = log(0.1)` before `exp()`, giving `s_eff ≥ 0.1`. At s = 0.1:
+```
+P(m = μ | Logistic(μ, 0.1)) = σ(5) − σ(−5) ≈ 0.987
+```
+which allows the joint model to express near-deterministic conditionals while remaining numerically stable (gradient at half-integer x is −2.5, bounded and correct).
+
+For values |x − μ| ≥ 5 (where the DLM still hits the internal 1e-10 clamp), Fix 1 (mixture prior) covers the residual probability mass with a well-behaved Laplace gradient.
+
+**Test.** `test_v7_scale_floor_prevents_collapse` — fills `log_s = −100`, checks finite log-prob and gradient for EntropyModelFactored, EntropyModelJoint, EntropyModelCondZ.
+
+---
+
+### Fix 3 — Context B Backward Disabled
+
+**Problem.** Context B models `q_φ(m|z)`. The backward loss evaluates `-log q_φ(z/δ | z_fixed)` with `z_fixed = z.detach()`. Since `m = round(z/δ)` is a deterministic function of z, the model can learn the trivial solution:
+
+```
+q_φ(m|z) = 1   if m = round(z/δ)
+          = 0   otherwise
+```
+
+At this solution, `-log q_φ(z/δ | z) = 0` everywhere: the backward loss becomes a zero constant and provides NO gradient to the speaker. The speaker is free to increase |z| without penalty. This is a fundamental degeneracy, not a training instability — no amount of warm-start or hyperparameter tuning fixes it.
+
+Furthermore, using `z.detach()` as the conditioning context while differentiating through `z_over_delta = z/δ` (which carries gradients) creates an inconsistent gradient: the model is incentivised to push z toward wherever the OLD z's DLM peaked, not toward a genuinely lower-rate region.
+
+**Fix.** In `trainer.update()`, the backward entropy loss to the speaker is guarded:
+
+```python
+if (... and self.config.entropy_model_context == "A"):
+    # context B: skip — backward is degenerate
+```
+
+Context B is correctly used for MEASUREMENT: its forward loss trains q_φ(m|z) and the `entropy_rate` / `qphi_gap` metrics reflect the conditional entropy H(m|z). If a speaker gradient from the entropy path is needed alongside context B measurement, the recommended approach is to run context A as the loss channel and context B as a parallel measurement-only model.
+
+**Test.** `test_v8_context_b_backward_disabled` — zero RL signal, `loss_comms_mode="entropy"`: context A must change speaker params; context B must not.

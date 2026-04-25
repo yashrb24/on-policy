@@ -7,6 +7,47 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
+# ---------------------------------------------------------------------------
+# Mixture-prior constants — shared by all entropy model classes
+# ---------------------------------------------------------------------------
+# All DLM entropy models mix their learned q_φ with a fixed broad Laplace
+# component to guarantee non-zero probability everywhere on ℤ (and on ℝ for
+# the continuous Ballé backward evaluation).
+#
+# Guarantee: q̃_φ(x) ≥ _FLAT_ALPHA · Laplace(x; 0, _FLAT_SCALE) > 0  ∀ x
+#
+# This eliminates the gradient dead-zone that occurs when q_φ has never seen
+# a particular message value: instead of hitting the 1e-10 clamp and getting
+# zero gradient, the flat component provides a finite, direction-correct signal
+# (Laplace gradient = sign(x)/_FLAT_SCALE, always pointing toward smaller |x|).
+# Warm-start is therefore a useful acceleration aid but NOT required for safety.
+#
+# Cost: at most −log₂(_FLAT_ALPHA) ≈ 6.6 bits added to worst-case NLL; in
+# practice the learned q_φ dominates (ratio ≈ 99:1) after a few gradient steps.
+# See docs/pillars/PILLAR_P2.md §4 and docs/MATH.md §12 for derivation.
+_FLAT_ALPHA: float = 0.01    # weight of fixed flat component in mixture
+_FLAT_SCALE: float = 50.0    # Laplace scale (covers ±150 integers at 1% of peak)
+# Minimum DLM scale. s=0.5 would cap per-component probability at ~0.46 (P=σ(1)−σ(−1)),
+# preventing joint models from learning sharp conditionals (breaks V4).
+# s=0.1 allows P≈0.987 (P=σ(5)−σ(−5)) while remaining numerically stable — values
+# 5+ bins away from a component still get a non-zero gradient via the flat floor.
+_S_LOG_MIN: float = math.log(0.1)
+
+
+def _mix_with_flat(log_q_learned: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Mix learned DLM log-prob with a fixed broad Laplace floor.
+
+    log q̃_φ(x) = log[(1−α)·q_φ(x) + α·Laplace(x; 0, _FLAT_SCALE)]
+
+    Applied per-element; x and log_q_learned must have the same shape.
+    Works for both integer m (forward loss) and continuous z/δ (backward loss).
+    """
+    log_q_flat = -x.abs() / _FLAT_SCALE - math.log(2.0 * _FLAT_SCALE)
+    return torch.logaddexp(
+        log_q_learned + math.log(1.0 - _FLAT_ALPHA),
+        log_q_flat + math.log(_FLAT_ALPHA),
+    )
+
 
 def layer_init(
     layer: nn.Linear,
@@ -93,11 +134,15 @@ class EntropyModelFactored(nn.Module):
         return torch.logsumexp(log_p_k, dim=-1)                       # (..., z_dim)
 
     def log_prob(self, x: torch.Tensor) -> torch.Tensor:
-        """Log q_φ(x) per dimension. x: (..., z_dim)."""
-        return self._dlm_log_prob(x, self.log_pi, self.mu, self.log_s.exp())
+        """Log q̃_φ(x) per dimension (mixture-prior). x: (..., z_dim)."""
+        # Scale floor: clamp log_s ≥ log(0.5) so s_eff ≥ 0.5; prevents DLM
+        # from collapsing to a delta function even if log_s is driven to -∞.
+        s = self.log_s.clamp(min=_S_LOG_MIN).exp()
+        log_q = self._dlm_log_prob(x, self.log_pi, self.mu, s)
+        return _mix_with_flat(log_q, x)
 
     def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
-        """Negative log-likelihood in bits per element: −log₂ q_φ(x)."""
+        """Negative log-likelihood in bits per element: −log₂ q̃_φ(x)."""
         return -self.log_prob(x) / math.log(2)
 
 
@@ -144,18 +189,20 @@ class EntropyModelJoint(nn.Module):
         return torch.logsumexp(log_p_k, dim=-1)
 
     def log_prob(self, x: torch.Tensor) -> torch.Tensor:
-        """Log q_φ(x) per dimension. x: (..., z_dim)."""
+        """Log q̃_φ(x) per dimension (mixture-prior). x: (..., z_dim)."""
         lp = [self._dlm_log_prob_1d(
-            x[..., 0], self.log_pi_0, self.mu_0, self.log_s_0.exp()
+            x[..., 0], self.log_pi_0, self.mu_0,
+            self.log_s_0.clamp(min=_S_LOG_MIN).exp(),
         )]
         for k, mlp in enumerate(self.cond_mlps, start=1):
             params = mlp(x[..., :k])           # (..., 3K)
             log_pi_k = params[..., :self.K]
             mu_k = params[..., self.K:2 * self.K]
-            # bias log_s output toward wide init (add 1.0 before exp)
-            s_k = (params[..., 2 * self.K:] + 1.0).exp()
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+            s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
             lp.append(self._dlm_log_prob_1d(x[..., k], log_pi_k, mu_k, s_k))
-        return torch.stack(lp, dim=-1)          # (..., z_dim)
+        log_q = torch.stack(lp, dim=-1)         # (..., z_dim)
+        return _mix_with_flat(log_q, x)
 
     def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x) / math.log(2)
@@ -183,20 +230,22 @@ class EntropyModelCondZ(nn.Module):
         ])
 
     def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        """Log q_φ(x|z) per dimension. x, z: (..., z_dim)."""
+        """Log q̃_φ(x|z) per dimension (mixture-prior). x, z: (..., z_dim)."""
         lp = []
         for k, mlp in enumerate(self.mlps):
             params = mlp(z)                           # (..., 3K)
             log_pi_k = params[..., :self.K]
             mu_k = params[..., self.K:2 * self.K]
-            s_k = (params[..., 2 * self.K:] + 1.0).exp()  # wide init bias
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+            s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
             x_e = x[..., k].unsqueeze(-1)             # (..., 1)
             upper = torch.sigmoid((x_e + 0.5 - mu_k) / s_k)
             lower = torch.sigmoid((x_e - 0.5 - mu_k) / s_k)
             log_pi_n = log_pi_k - torch.logsumexp(log_pi_k, dim=-1, keepdim=True)
             log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
             lp.append(torch.logsumexp(log_p_k, dim=-1))  # (...)
-        return torch.stack(lp, dim=-1)                # (..., z_dim)
+        log_q = torch.stack(lp, dim=-1)               # (..., z_dim)
+        return _mix_with_flat(log_q, x)
 
     def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x, z) / math.log(2)
@@ -240,7 +289,8 @@ class EntropyModelJointCondZ(nn.Module):
     ) -> torch.Tensor:         # (...)
         log_pi = params[..., :K]
         mu = params[..., K:2 * K]
-        s = (params[..., 2 * K:] + 1.0).exp()  # wide init bias
+        # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+        s = (params[..., 2 * K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
         x_e = x_k.unsqueeze(-1)                 # (..., 1)
         upper = torch.sigmoid((x_e + 0.5 - mu) / s)
         lower = torch.sigmoid((x_e - 0.5 - mu) / s)
@@ -250,12 +300,13 @@ class EntropyModelJointCondZ(nn.Module):
         )
 
     def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        """Log q_φ(x|z) per dimension. x, z: (..., z_dim)."""
+        """Log q̃_φ(x|z) per dimension (mixture-prior). x, z: (..., z_dim)."""
         lp = [self._eval_dlm_1d(x[..., 0], self.mlp_0(z), self.K)]
         for k, mlp in enumerate(self.cond_mlps, start=1):
             context = torch.cat([x[..., :k], z], dim=-1)  # (..., k + z_dim)
             lp.append(self._eval_dlm_1d(x[..., k], mlp(context), self.K))
-        return torch.stack(lp, dim=-1)  # (..., z_dim)
+        log_q = torch.stack(lp, dim=-1)  # (..., z_dim)
+        return _mix_with_flat(log_q, x)
 
     def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x, z) / math.log(2)

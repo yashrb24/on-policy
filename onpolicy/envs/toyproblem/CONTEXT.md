@@ -39,9 +39,9 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 
 ## Current State
 
-**Phase:** 2 — Hyperparameter sweeps (P2 implementation + validation complete; awaiting sweep finish)  
+**Phase:** 2 — Hyperparameter sweeps (P2 implementation + validation + hardening complete; awaiting sweep finish)  
 **Running:** Stage A sweep — writing to `onpolicy/envs/toyproblem/runs/sweep_stage_a` (legacy path, mid-run). Do NOT move until sweep finishes. Last checked: ~86% complete (1,867 / ~2,175 runs), PID 11556.  
-**P2 status:** Implementation complete (123 tests, 0 failures). 5 mathematical validation tests (V1–V5) passing. Key findings in MATH.md §11 and PILLAR_P2.md.  
+**P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). Documented in MATH.md §12 and PILLAR_P2.md §4/§5.  
 **Immediate next action:** Wait for Stage A to finish → move data to canonical path → run `report_baseline.py` + `generate_all_paper_figures` → freeze baseline_best.yaml → launch P2-A ablation.
 
 **Directory layout (canonical, from repo root):**
@@ -72,6 +72,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 12 (2026-04-25):** Applied 3 hardening fixes to P2 entropy model. Fix 1: mixture prior q̃_φ = (1−α)q_φ + α·Laplace(0,50) added to all 4 entropy model classes — guarantees nonzero gradient everywhere, eliminating gradient dead-zone without warm-start dependency. Fix 2: DLM scale floor s≥0.1 (was s≥0.5, which capped joint conditional probability at 0.46 and broke V4). Fix 3: context B backward loss disabled — q_φ(m|z) conditioning on z is degenerate since m=round(z/δ) is deterministic; context B is now measurement-only. Update order also corrected: q_φ forward update runs before RL step (fresher rate signal). Added 3 new validation tests (V6/V7/V8). All 47 tests pass. Mathematical basis documented in MATH.md §12 and PILLAR_P2.md §4/§5.
 
 **Session 11 (2026-04-25):** Implemented Pillar P2 (Entropy Model) end-to-end. Added EntropyModelFactored, EntropyModelJoint, EntropyModelCondZ, EntropyModelJointCondZ to network.py (closing 2×2 factored/joint × context A/B grid) plus joint_entropy_bits and total_correlation_bits helpers. Extended MAPPOConfig with 8 P2 fields; integrated Ballé two-term loss (fwd trains q_φ, bwd propagates to speaker with frozen q_φ) and warm-start into trainer.py. Added 8 CLI flags and P2 CSV columns to train.py. Smoke test confirmed entropy_rate finite and non-NaN. Added run_p2_ablation.py (6-stage, 395 runs) and 4 P2 paper figures. All 118 tests pass. Then added 5 rigorous mathematical validation tests (V1–V5) covering DLM normalisation, entropy convergence, Ballé gradient direction, TC identity, and warm-start convergence — now 123 tests total. Key empirical findings: (1) DLM has irreducible ~0.27 bits/dim approximation floor (qphi_gap floor ≈ 0.27 × z_dim); (2) warm-start is critical not optional — without it q_φ assigns probability < 1e-10 to unseen messages, killing Ballé backward gradient entirely; (3) TC identity confirmed empirically (factored−joint gap ≈ TC + ε_DLM); (4) use tc_bits not NLL gap for model selection. All findings documented in MATH.md §11, PILLAR_P2.md §2/§5/§6/§7/§9. Phase 2 Stage A sweep still running at ~86% complete (PID 11556) — do NOT migrate or analyse until complete.
 
