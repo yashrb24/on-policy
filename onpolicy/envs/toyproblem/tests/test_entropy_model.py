@@ -246,6 +246,82 @@ class TestEntropyHelpers:
 
 
 from onpolicy.envs.toyproblem.trainer import MAPPOConfig, MAPPOTrainer
+from onpolicy.envs.toyproblem.buffer import RolloutBuffer
+
+
+def _make_buffer(n_steps=4, n_envs=4, z_dim=3, device=torch.device("cpu")) -> RolloutBuffer:
+    buf = RolloutBuffer(n_steps, n_envs, z_dim, device=device)
+    buf.goals = torch.randn(n_steps, n_envs, 2)
+    buf.listener_pos = torch.randn(n_steps, n_envs, 2)
+    buf.actions = torch.randint(0, 5, (n_steps, n_envs))
+    buf.log_probs = torch.randn(n_steps, n_envs)
+    buf.advantages = torch.randn(n_steps, n_envs)
+    buf.returns = torch.randn(n_steps, n_envs)
+    buf.goal_ids = torch.zeros(n_steps, n_envs, dtype=torch.long)
+    return buf
+
+
+class TestTrainerEntropyLoss:
+    def _make_trainer_with_em(self, mode="entropy") -> MAPPOTrainer:
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", delta=1.0, lambda_comms=1e-3,
+            use_entropy_model=True, entropy_model_K=3,
+            entropy_model_type="factored", entropy_model_context="A",
+            lr_qphi_mult=5.0, n_qphi_steps=2,
+            loss_comms_mode=mode,
+            update_epochs=1, num_minibatches=1,
+        )
+        return MAPPOTrainer(cfg, device=torch.device("cpu"))
+
+    def test_update_returns_entropy_rate(self):
+        """update() must include entropy_rate in returned metrics."""
+        t = self._make_trainer_with_em()
+        buf = _make_buffer(z_dim=3)
+        buf.advantages = torch.randn(4, 4)
+        buf.returns = torch.ones(4, 4)
+        metrics = t.update(buf)
+        assert "entropy_rate" in metrics
+
+    def test_update_returns_qphi_gap(self):
+        t = self._make_trainer_with_em()
+        buf = _make_buffer(z_dim=3)
+        buf.advantages = torch.randn(4, 4)
+        buf.returns = torch.ones(4, 4)
+        metrics = t.update(buf)
+        assert "qphi_gap" in metrics
+
+    def test_entropy_mode_changes_loss(self):
+        """With mode='entropy', entropy_rate must be logged and non-zero."""
+        t = self._make_trainer_with_em(mode="entropy")
+        buf = _make_buffer(z_dim=3)
+        buf.advantages = torch.randn(4, 4)
+        buf.returns = torch.ones(4, 4)
+        metrics = t.update(buf)
+        assert metrics["entropy_rate"] > 0.0
+
+    def test_qphi_params_change_after_update(self):
+        """q_φ parameters must be updated by the q_φ optimizer."""
+        t = self._make_trainer_with_em()
+        buf = _make_buffer(z_dim=3)
+        buf.advantages = torch.randn(4, 4)
+        buf.returns = torch.ones(4, 4)
+        mu_before = t.entropy_model.mu.detach().clone()
+        t.update(buf)
+        assert not torch.allclose(t.entropy_model.mu, mu_before)
+
+    def test_no_entropy_metrics_when_disabled(self):
+        """Without use_entropy_model, entropy_rate must NOT be in metrics."""
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", delta=1.0,
+            use_entropy_model=False,
+            update_epochs=1, num_minibatches=1,
+        )
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        buf = _make_buffer(z_dim=3)
+        buf.advantages = torch.randn(4, 4)
+        buf.returns = torch.ones(4, 4)
+        metrics = t.update(buf)
+        assert "entropy_rate" not in metrics
 
 
 class TestTrainerEntropyModelConstruction:

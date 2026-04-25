@@ -13,6 +13,7 @@ from onpolicy.envs.toyproblem.network import (
     Critic, ListenerActor, SpeakerNetwork,
     EntropyModelFactored, EntropyModelJoint,
     EntropyModelCondZ, EntropyModelJointCondZ,
+    joint_entropy_bits, total_correlation_bits,
 )
 from onpolicy.utils.valuenorm import ValueNorm
 
@@ -126,7 +127,6 @@ class MAPPOTrainer(nn.Module):
         return self.critic(state)
 
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
-        # Per-batch advantage normalization (computed once, applied to all mbs).
         adv_flat = buffer.advantages.flatten()
         adv_mean = adv_flat.mean()
         adv_std = adv_flat.std()
@@ -135,8 +135,6 @@ class MAPPOTrainer(nn.Module):
 
         for _ in range(self.config.update_epochs):
             for mb in buffer.minibatches(self.config.num_minibatches):
-                # Fresh forward — speaker weights change across minibatches;
-                # channel dither is resampled each pass (unbiased per Thm A.1 / Schuchman).
                 z_new = self.speaker(mb["goals"])
                 z_hat, ch_info = self.channel(z_new)
                 dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
@@ -146,49 +144,70 @@ class MAPPOTrainer(nn.Module):
                 ratio = torch.exp(new_logp - mb["old_log_probs"])
                 adv = (mb["advantages"] - adv_mean) / (adv_std + 1e-8)
 
-                # Actor loss: PPO clip + entropy bonus. The `- coef * H`
-                # on a minimization target is a positive entropy bonus
-                # (encourages high-entropy policies).
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * adv
                 pg_loss = -torch.min(surr1, surr2).mean()
                 entropy_mean = entropy.mean()
                 actor_loss = pg_loss - self.config.entropy_coef * entropy_mean
 
-                # Critic loss in normalized space. Update stats on raw returns,
-                # then normalize returns for MSE.
-                returns_mb = mb["returns"].unsqueeze(-1)  # (mb, 1)
+                returns_mb = mb["returns"].unsqueeze(-1)
                 self.value_norm.update(returns_mb)
                 returns_norm = self.value_norm.normalize(returns_mb)
 
                 state_mb = torch.cat([mb["listener_pos"], mb["goals"]], dim=-1)
-                new_value = self.critic(state_mb)  # (mb, 1)
+                new_value = self.critic(state_mb)
                 critic_loss = 0.5 * (new_value - returns_norm).pow(2).mean()
 
-                # Communication cost: always compute for logging; only add to
-                # the loss when lambda_comms > 0 (IdentityChannel returns zeros anyway).
-                comms_per_elem = self.channel.comms_loss(z_new)  # (mb, z_dim)
+                comms_per_elem = self.channel.comms_loss(z_new)
                 comms_mean = comms_per_elem.mean()
 
                 total_loss = actor_loss + critic_loss
                 if self.config.lambda_comms > 0.0:
-                    total_loss = total_loss + self.config.lambda_comms * comms_mean
+                    if self.config.loss_comms_mode in ("magnitude", "both"):
+                        total_loss = total_loss + self.config.lambda_comms * comms_mean
 
+                # P2: entropy model backward loss (speaker gradient)
+                m = ch_info.get("m")
+                if self.entropy_model is not None and m is not None:
+                    if self.config.loss_comms_mode in ("entropy", "both"):
+                        z_over_delta = z_new / self.config.delta
+                        # Freeze q_φ: grad flows to z, not to q_φ params
+                        for p in self.entropy_model.parameters():
+                            p.requires_grad_(False)
+                        if self.config.entropy_model_context == "A":
+                            nll_bwd = self.entropy_model.nll_bits(z_over_delta)
+                        else:  # context B
+                            nll_bwd = self.entropy_model.nll_bits(z_over_delta, z_new.detach())
+                        for p in self.entropy_model.parameters():
+                            p.requires_grad_(True)
+                        loss_ent_bwd = nll_bwd.mean()
+                        total_loss = total_loss + self.config.lambda_comms * loss_ent_bwd
+
+                # RL optimizer step
                 self.optim.zero_grad(set_to_none=True)
                 total_loss.backward()
                 nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                 self.optim.step()
 
+                # P2: q_φ forward update (n_qphi_steps)
+                if self.entropy_model is not None and m is not None:
+                    m_float = m.float().detach()
+                    for _ in range(self.config.n_qphi_steps):
+                        if self.config.entropy_model_context == "A":
+                            nll_fwd = self.entropy_model.nll_bits(m_float)
+                        else:  # context B
+                            nll_fwd = self.entropy_model.nll_bits(m_float, z_new.detach())
+                        loss_q = nll_fwd.mean()
+                        self.optim_qphi.zero_grad(set_to_none=True)
+                        loss_q.backward()
+                        self.optim_qphi.step()
+
+                # Metrics (no_grad)
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
                     clip_frac = ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
-                    # Surrogate: differentiable Jensen UB used in training loss.
                     bits_per_msg = comms_per_elem.sum(dim=-1).mean().item()
-                    # True transmission cost: float32 for none, log₂(|m|+1) for
-                    # quantized channels, fixed B for STE.
-                    true_bits_per_elem = self.channel.transmission_bits_per_elem(
-                        z_new, ch_info
-                    )
+                    true_bits_per_elem = self.channel.transmission_bits_per_elem(z_new, ch_info)
                     true_bits_per_msg = true_bits_per_elem.sum(dim=-1).mean().item()
                     z_norm = z_new.norm(dim=-1).mean().item()
 
@@ -202,12 +221,40 @@ class MAPPOTrainer(nn.Module):
                 metrics["true_bits_per_msg"].append(true_bits_per_msg)
                 metrics["z_norm"].append(z_norm)
 
-                # Per-goal bit allocation: mean bits used per goal index (0–5).
                 with torch.no_grad():
-                    bits_per_elem = comms_per_elem.sum(dim=-1)  # (mb,)
+                    bits_per_elem = comms_per_elem.sum(dim=-1)
                     for g_idx in mb["goal_ids"].unique():
                         mask = mb["goal_ids"] == g_idx
                         key = f"bits_goal_{g_idx.item()}"
                         metrics[key].append(bits_per_elem[mask].mean().item())
+
+                # P2 metrics
+                if self.entropy_model is not None and m is not None:
+                    with torch.no_grad():
+                        m_float = m.float().detach()
+                        if self.config.entropy_model_context == "A":
+                            nll_log = self.entropy_model.nll_bits(m_float)
+                        else:
+                            nll_log = self.entropy_model.nll_bits(m_float, z_new.detach())
+                        entropy_rate = nll_log.mean().item()
+                        qphi_neg_log_max = nll_log.max().item()
+                        h_emp = joint_entropy_bits(m.long())
+                        tc = total_correlation_bits(m.long())
+                        qphi_gap = entropy_rate - h_emp
+                        bits_vs_mag = bits_per_msg - entropy_rate
+
+                        metrics["entropy_rate"].append(entropy_rate)
+                        metrics["H_m_empirical"].append(h_emp)
+                        metrics["qphi_gap"].append(qphi_gap)
+                        metrics["tc_bits"].append(tc)
+                        metrics["qphi_neg_log_max"].append(qphi_neg_log_max)
+                        metrics["bits_vs_magnitude"].append(bits_vs_mag)
+
+                        # Per-goal entropy rate
+                        nll_per_msg = nll_log.sum(dim=-1)  # (mb,)
+                        for g_idx in mb["goal_ids"].unique():
+                            mask = mb["goal_ids"] == g_idx
+                            key = f"entropy_rate_goal_{g_idx.item()}"
+                            metrics[key].append(nll_per_msg[mask].mean().item())
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}
