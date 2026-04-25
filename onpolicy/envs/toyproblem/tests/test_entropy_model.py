@@ -108,3 +108,45 @@ class TestEntropyModelJoint:
         assert x.grad.shape == (8, 3)
         # All dimensions should have non-zero grad (context coupling)
         assert x.grad.abs().sum(dim=0).min().item() > 0
+
+
+from onpolicy.envs.toyproblem.network import EntropyModelCondZ
+
+
+class TestEntropyModelCondZ:
+    def test_output_shape(self):
+        model = EntropyModelCondZ(z_dim=3, K=5)
+        m = torch.zeros(32, 3)
+        z = torch.randn(32, 3)
+        nll = model.nll_bits(m, z)
+        assert nll.shape == (32, 3)
+
+    def test_nll_positive(self):
+        torch.manual_seed(0)
+        model = EntropyModelCondZ(z_dim=3, K=5)
+        m = torch.randn(64, 3).round()
+        z = torch.randn(64, 3)
+        nll = model.nll_bits(m, z)
+        assert (nll >= 0).all()
+
+    def test_grad_to_z_when_params_frozen(self):
+        """Frozen q_φ: grad flows through z (context) to speaker."""
+        model = EntropyModelCondZ(z_dim=2, K=3)
+        z = torch.randn(8, 2, requires_grad=True)
+        m = torch.randn(8, 2).round().detach()
+        for p in model.parameters():
+            p.requires_grad_(False)
+        nll = model.nll_bits(m, z)
+        nll.mean().backward()
+        assert z.grad is not None
+        for p in model.parameters():
+            p.requires_grad_(True)
+
+    def test_different_z_different_output(self):
+        """Conditioning: different z values should give different NLL."""
+        torch.manual_seed(0)
+        model = EntropyModelCondZ(z_dim=2, K=3)
+        m = torch.zeros(8, 2)
+        z1 = torch.randn(8, 2)
+        z2 = torch.randn(8, 2)
+        assert not torch.allclose(model.nll_bits(m, z1), model.nll_bits(m, z2))

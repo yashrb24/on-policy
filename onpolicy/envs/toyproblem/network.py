@@ -158,3 +158,44 @@ class EntropyModelJoint(nn.Module):
 
     def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x) / math.log(2)
+
+
+class EntropyModelCondZ(nn.Module):
+    """Context-B DLM: q_φ(m | z). Per-dimension MLP(z) → DLM params.
+
+    Unrealistic at deployment (receiver does not observe z), but useful as an
+    oracle upper bound on rate reduction achievable with z-side information.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # One MLP per output dimension: full z → DLM params for that dimension
+        self.mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(z_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for _ in range(z_dim)
+        ])
+
+    def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Log q_φ(x|z) per dimension. x, z: (..., z_dim)."""
+        lp = []
+        for k, mlp in enumerate(self.mlps):
+            params = mlp(z)                           # (..., 3K)
+            log_pi_k = params[..., :self.K]
+            mu_k = params[..., self.K:2 * self.K]
+            s_k = (params[..., 2 * self.K:] + 1.0).exp()  # wide init bias
+            x_e = x[..., k].unsqueeze(-1)             # (..., 1)
+            upper = torch.sigmoid((x_e + 0.5 - mu_k) / s_k)
+            lower = torch.sigmoid((x_e - 0.5 - mu_k) / s_k)
+            log_pi_n = log_pi_k - torch.logsumexp(log_pi_k, dim=-1, keepdim=True)
+            log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
+            lp.append(torch.logsumexp(log_p_k, dim=-1))  # (...)
+        return torch.stack(lp, dim=-1)                # (..., z_dim)
+
+    def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x, z) / math.log(2)
