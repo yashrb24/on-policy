@@ -9,7 +9,11 @@ from torch import nn
 
 from onpolicy.envs.toyproblem.buffer import RolloutBuffer
 from onpolicy.envs.toyproblem.channels import build_channel
-from onpolicy.envs.toyproblem.network import Critic, ListenerActor, SpeakerNetwork
+from onpolicy.envs.toyproblem.network import (
+    Critic, ListenerActor, SpeakerNetwork,
+    EntropyModelFactored, EntropyModelJoint,
+    EntropyModelCondZ, EntropyModelJointCondZ,
+)
 from onpolicy.utils.valuenorm import ValueNorm
 
 
@@ -28,6 +32,16 @@ class MAPPOConfig:
     delta: float = 1.0
     lambda_comms: float = 0.0
     ste_clip: float = 10.0
+
+    # P2 — Entropy model
+    use_entropy_model: bool = False
+    entropy_model_K: int = 5
+    entropy_model_type: str = "factored"   # "factored" | "joint"
+    entropy_model_context: str = "A"       # "A" (marginal) | "B" (conditioned on z)
+    lr_qphi_mult: float = 10.0             # q_φ lr = lr_qphi_mult × lr
+    n_qphi_steps: int = 3                  # q_φ gradient steps per RL minibatch
+    n_warmup_steps: int = 5000             # q_φ warm-start steps before RL
+    loss_comms_mode: str = "magnitude"     # "magnitude" | "entropy" | "both"
 
 
 class MAPPOTrainer(nn.Module):
@@ -54,6 +68,32 @@ class MAPPOTrainer(nn.Module):
             config.channel, config.delta, ste_clip=config.ste_clip
         ).to(device)
         self.value_norm = ValueNorm(input_shape=1, device=device)
+
+        # P2 — Entropy model and separate q_φ optimizer
+        self.entropy_model = None
+        self.optim_qphi = None
+        if config.use_entropy_model:
+            ctx = config.entropy_model_context
+            typ = config.entropy_model_type
+            K = config.entropy_model_K
+            if ctx == "A" and typ == "factored":
+                self.entropy_model = EntropyModelFactored(config.z_dim, K).to(device)
+            elif ctx == "A" and typ == "joint":
+                self.entropy_model = EntropyModelJoint(config.z_dim, K).to(device)
+            elif ctx == "B" and typ == "factored":
+                self.entropy_model = EntropyModelCondZ(config.z_dim, K).to(device)
+            elif ctx == "B" and typ == "joint":
+                self.entropy_model = EntropyModelJointCondZ(config.z_dim, K).to(device)
+            else:
+                raise ValueError(
+                    f"Unsupported entropy_model_context={ctx!r}, type={typ!r}. "
+                    f"Supported: (A, factored), (A, joint), (B, factored), (B, joint)."
+                )
+            self.optim_qphi = torch.optim.Adam(
+                self.entropy_model.parameters(),
+                lr=config.lr * config.lr_qphi_mult,
+                eps=config.adam_eps,
+            )
 
         self._trainable = (
             list(self.speaker.parameters())

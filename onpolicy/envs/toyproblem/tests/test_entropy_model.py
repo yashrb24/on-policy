@@ -243,3 +243,53 @@ class TestEntropyHelpers:
     def test_tc_z_dim_1_is_zero(self):
         m = torch.randint(0, 8, (500, 1))
         assert total_correlation_bits(m) == 0.0
+
+
+from onpolicy.envs.toyproblem.trainer import MAPPOConfig, MAPPOTrainer
+
+
+class TestTrainerEntropyModelConstruction:
+    def _make_trainer(self, **overrides) -> MAPPOTrainer:
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", delta=1.0, lambda_comms=1e-3,
+            use_entropy_model=True, entropy_model_K=3,
+            **overrides,
+        )
+        return MAPPOTrainer(cfg, device=torch.device("cpu"))
+
+    def test_factored_A_constructed(self):
+        from onpolicy.envs.toyproblem.network import EntropyModelFactored
+        t = self._make_trainer(entropy_model_type="factored", entropy_model_context="A")
+        assert isinstance(t.entropy_model, EntropyModelFactored)
+        assert t.optim_qphi is not None
+
+    def test_joint_A_constructed(self):
+        from onpolicy.envs.toyproblem.network import EntropyModelJoint
+        t = self._make_trainer(entropy_model_type="joint", entropy_model_context="A")
+        assert isinstance(t.entropy_model, EntropyModelJoint)
+
+    def test_cond_z_B_constructed(self):
+        from onpolicy.envs.toyproblem.network import EntropyModelCondZ
+        t = self._make_trainer(entropy_model_type="factored", entropy_model_context="B")
+        assert isinstance(t.entropy_model, EntropyModelCondZ)
+
+    def test_joint_cond_z_B_constructed(self):
+        from onpolicy.envs.toyproblem.network import EntropyModelJointCondZ
+        t = self._make_trainer(entropy_model_type="joint", entropy_model_context="B")
+        assert isinstance(t.entropy_model, EntropyModelJointCondZ)
+
+    def test_entropy_model_none_when_disabled(self):
+        cfg = MAPPOConfig(z_dim=3, channel="sd", use_entropy_model=False)
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        assert t.entropy_model is None
+        assert t.optim_qphi is None
+
+    def test_qphi_lr_scaled(self):
+        """q_φ optimizer lr = lr_qphi_mult × base_lr."""
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", use_entropy_model=True, entropy_model_K=3,
+            lr=1e-3, lr_qphi_mult=5.0,
+        )
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        actual_lr = t.optim_qphi.param_groups[0]["lr"]
+        assert abs(actual_lr - 5e-3) < 1e-9
