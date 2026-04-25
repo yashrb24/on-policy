@@ -7,7 +7,12 @@ from torch import nn
 class IdentityChannel(nn.Module):
     """No-op passthrough so `--channel none` shares the same call shape as SD/NSD."""
 
-    def __init__(self, delta: float = 1.0) -> None:
+    def __init__(
+        self,
+        delta: float = 1.0,
+        delta_learnable: bool = False,  
+        zdim: int = 3,
+    ) -> None:
         super().__init__()
         self.delta = delta
 
@@ -28,11 +33,30 @@ class DDCL_SD(nn.Module):
     so for gradients we just add fresh uniform noise (∂ẑ/∂z = 1). The real
     pipeline runs detached alongside it for bitrate logging and deployment
     parity (in a real system sender and receiver share eps via a common RNG).
+
+    When delta_learnable=True, delta is reparameterised as exp(log_delta) so
+    it stays positive and gradients flow through it. log_delta is shaped
+    (zdim,) giving one learnable step-size per channel dimension.
     """
 
-    def __init__(self, delta: float = 1.0) -> None:
+    def __init__(
+        self,
+        delta: float = 1.0,
+        delta_learnable: bool = False,
+        zdim: int = 1,
+    ) -> None:
         super().__init__()
-        self.delta = delta
+        self._delta_learnable = delta_learnable
+        if delta_learnable:
+            self.log_delta = nn.Parameter(torch.randn(zdim))
+        else:
+            self._delta = delta
+
+    @property
+    def delta(self) -> torch.Tensor | float:
+        if self._delta_learnable:
+            return self.log_delta.exp()
+        return self._delta
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
         d = self.delta
@@ -68,11 +92,30 @@ class DDCL_NSD(nn.Module):
     bin center (no ε subtraction, no shared RNG). Schuchman's theorem gives
     E[ẑ|z] = z exactly, so straight-through with slope 1 is an unbiased
     estimator of the expected gradient.
+
+    When delta_learnable=True, delta is reparameterised as exp(log_delta) so
+    it stays positive and gradients flow through it. log_delta is shaped
+    (zdim,) giving one learnable step-size per channel dimension.
     """
 
-    def __init__(self, delta: float = 1.0) -> None:
+    def __init__(
+        self,
+        delta: float = 1.0,
+        delta_learnable: bool = False,
+        zdim: int = 1,
+    ) -> None:
         super().__init__()
-        self.delta = delta
+        self._delta_learnable = delta_learnable
+        if delta_learnable:
+            self.log_delta = nn.Parameter(torch.randn(zdim))
+        else:
+            self._delta = delta
+
+    @property
+    def delta(self) -> torch.Tensor | float:
+        if self._delta_learnable:
+            return self.log_delta.exp()
+        return self._delta
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
         d = self.delta
@@ -94,8 +137,13 @@ class DDCL_NSD(nn.Module):
         return torch.log2(z.abs() / self.delta + 1)
 
 
-def build_channel(name: str, delta: float) -> nn.Module:
+def build_channel(
+    name: str,
+    delta: float,
+    delta_learnable: bool = False,
+    zdim: int = 1,
+) -> nn.Module:
     table = {"none": IdentityChannel, "sd": DDCL_SD, "nsd": DDCL_NSD}
     if name not in table:
         raise ValueError(f"Unknown channel {name!r}; expected one of {list(table)}")
-    return table[name](delta)
+    return table[name](delta=delta, delta_learnable=delta_learnable, zdim=zdim)

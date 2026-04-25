@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--z_dim", type=int, default=3)
     p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd"])
     p.add_argument("--delta", type=float, default=1.0)
+    p.add_argument("--delta_learnable", action="store_true")
     p.add_argument("--lambda_comms", type=float, default=0.0)
     p.add_argument("--use_entropic_prior", action="store_true")
     p.add_argument("--gmm_structure", type=str, default="joint",
@@ -86,6 +87,7 @@ def main() -> None:
         num_minibatches=args.num_minibatches,
         channel=args.channel,
         delta=args.delta,
+        delta_learnable=args.delta_learnable,
         lambda_comms=args.lambda_comms,
         use_entropic_prior=args.use_entropic_prior,
         gmm_structure=args.gmm_structure,

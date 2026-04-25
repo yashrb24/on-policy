@@ -26,6 +26,7 @@ class MAPPOConfig:
     adam_eps: float = 1e-5
     channel: str = "none"
     delta: float = 1.0
+    delta_learnable: bool = False
     lambda_comms: float = 0.0
     # --- Entropic GMM Prior ---
     use_entropic_prior: bool = False
@@ -57,7 +58,9 @@ class MAPPOTrainer(nn.Module):
             obs_dim=2 + config.z_dim, action_dim=5
         ).to(device)
         self.critic = Critic(state_dim=4).to(device)
-        self.channel = build_channel(config.channel, config.delta).to(device)
+        self.channel = build_channel(
+            config.channel, config.delta, config.delta_learnable, config.z_dim
+        ).to(device)
         self.value_norm = ValueNorm(input_shape=1, device=device)
 
         self._trainable = (
