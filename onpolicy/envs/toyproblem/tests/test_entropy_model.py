@@ -369,3 +369,39 @@ class TestTrainerEntropyModelConstruction:
         t = MAPPOTrainer(cfg, device=torch.device("cpu"))
         actual_lr = t.optim_qphi.param_groups[0]["lr"]
         assert abs(actual_lr - 5e-3) < 1e-9
+
+
+class TestWarmStart:
+    def test_warmup_returns_loss(self):
+        """warmup_entropy_model must return a finite float."""
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", delta=1.0,
+            use_entropy_model=True, entropy_model_K=3,
+            entropy_model_type="factored", entropy_model_context="A",
+            update_epochs=1, num_minibatches=1,
+        )
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        buf = _make_buffer(z_dim=3, n_steps=8, n_envs=4)
+        loss = t.warmup_entropy_model(buf, n_steps=10)
+        assert math.isfinite(loss), f"warmup loss not finite: {loss}"
+
+    def test_warmup_updates_qphi(self):
+        """After warmup, q_φ params must differ from init."""
+        torch.manual_seed(99)
+        cfg = MAPPOConfig(
+            z_dim=3, channel="sd", delta=1.0,
+            use_entropy_model=True, entropy_model_K=3,
+            update_epochs=1, num_minibatches=1,
+        )
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        mu_before = t.entropy_model.mu.detach().clone()
+        buf = _make_buffer(z_dim=3, n_steps=8, n_envs=4)
+        t.warmup_entropy_model(buf, n_steps=20)
+        assert not torch.allclose(t.entropy_model.mu, mu_before)
+
+    def test_warmup_no_change_without_em(self):
+        """warmup_entropy_model is a no-op when use_entropy_model=False."""
+        cfg = MAPPOConfig(z_dim=3, channel="sd", use_entropy_model=False)
+        t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+        result = t.warmup_entropy_model(_make_buffer(z_dim=3), n_steps=10)
+        assert result == 0.0

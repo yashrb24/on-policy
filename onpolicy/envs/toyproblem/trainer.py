@@ -126,6 +126,42 @@ class MAPPOTrainer(nn.Module):
         state = torch.cat([listener_pos, goal], dim=-1)
         return self.critic(state)
 
+    def warmup_entropy_model(self, buffer: RolloutBuffer, n_steps: int) -> float:
+        """Pre-train q_φ for n_steps gradient steps before RL begins.
+
+        Uses the current rollout buffer to sample minibatches. The speaker is
+        run in no-grad mode to collect discrete messages m. Only q_φ (optim_qphi)
+        is updated — RL parameters are untouched.
+
+        Returns the final warm-start loss value (0.0 if entropy model is off).
+        """
+        if self.entropy_model is None:
+            return 0.0
+        step = 0
+        final_loss = float("nan")
+        while step < n_steps:
+            for mb in buffer.minibatches(self.config.num_minibatches):
+                if step >= n_steps:
+                    break
+                with torch.no_grad():
+                    z = self.speaker(mb["goals"])
+                    _, ch_info = self.channel(z)
+                m = ch_info.get("m")
+                if m is None:
+                    return 0.0  # IdentityChannel — no discrete messages
+                m_float = m.float()
+                if self.config.entropy_model_context == "A":
+                    nll = self.entropy_model.nll_bits(m_float)
+                else:
+                    nll = self.entropy_model.nll_bits(m_float, z.detach())
+                loss = nll.mean()
+                self.optim_qphi.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optim_qphi.step()
+                final_loss = loss.item()
+                step += 1
+        return final_loss
+
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         adv_flat = buffer.advantages.flatten()
         adv_mean = adv_flat.mean()
