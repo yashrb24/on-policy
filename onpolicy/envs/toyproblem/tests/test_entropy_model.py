@@ -150,3 +150,60 @@ class TestEntropyModelCondZ:
         z1 = torch.randn(8, 2)
         z2 = torch.randn(8, 2)
         assert not torch.allclose(model.nll_bits(m, z1), model.nll_bits(m, z2))
+
+
+from onpolicy.envs.toyproblem.network import EntropyModelJointCondZ
+
+
+class TestEntropyModelJointCondZ:
+    def test_output_shape(self):
+        model = EntropyModelJointCondZ(z_dim=3, K=5)
+        m = torch.zeros(32, 3)
+        z = torch.randn(32, 3)
+        nll = model.nll_bits(m, z)
+        assert nll.shape == (32, 3)
+
+    def test_nll_positive(self):
+        torch.manual_seed(0)
+        model = EntropyModelJointCondZ(z_dim=3, K=5)
+        m = torch.randn(64, 3).round()
+        z = torch.randn(64, 3)
+        nll = model.nll_bits(m, z)
+        assert (nll >= 0).all()
+
+    def test_z_dim_1_matches_condz(self):
+        """Joint+CondZ with z_dim=1 reduces to CondZ (no autoregressive prefix)."""
+        torch.manual_seed(42)
+        cond_z = EntropyModelCondZ(z_dim=1, K=3)
+        joint_cond_z = EntropyModelJointCondZ(z_dim=1, K=3)
+        # Copy dim-0 MLP weights from cond_z into joint_cond_z.mlp_0
+        with torch.no_grad():
+            for p_src, p_dst in zip(cond_z.mlps[0].parameters(),
+                                    joint_cond_z.mlp_0.parameters()):
+                p_dst.copy_(p_src)
+        m = torch.tensor([[0.0], [1.0], [-1.0]])
+        z = torch.randn(3, 1)
+        assert torch.allclose(cond_z.nll_bits(m, z), joint_cond_z.nll_bits(m, z), atol=1e-5)
+
+    def test_different_z_different_output(self):
+        """Conditioning on z must change output."""
+        torch.manual_seed(0)
+        model = EntropyModelJointCondZ(z_dim=2, K=3)
+        m = torch.zeros(8, 2)
+        z1 = torch.randn(8, 2)
+        z2 = torch.randn(8, 2)
+        assert not torch.allclose(model.nll_bits(m, z1), model.nll_bits(m, z2))
+
+    def test_grad_flows_to_z_and_m_context(self):
+        """Frozen q_φ: grad flows to both z and m (autoregressive context)."""
+        model = EntropyModelJointCondZ(z_dim=3, K=3)
+        z = torch.randn(8, 3, requires_grad=True)
+        x = torch.randn(8, 3, requires_grad=True)
+        for p in model.parameters():
+            p.requires_grad_(False)
+        nll = model.nll_bits(x, z)
+        nll.mean().backward()
+        assert z.grad is not None
+        assert x.grad is not None
+        for p in model.parameters():
+            p.requires_grad_(True)

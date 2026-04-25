@@ -199,3 +199,62 @@ class EntropyModelCondZ(nn.Module):
 
     def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return -self.log_prob(x, z) / math.log(2)
+
+
+class EntropyModelJointCondZ(nn.Module):
+    """Context-B autoregressive DLM: q_φ(m | z).
+
+    q(m|z) = q_0(m_0|z) · ∏_{k≥1} q_k(m_k | m_0,...,m_{k-1}, z)
+
+    Closes the 2×2 of (factored/joint) × (context A/B). Each conditional MLP
+    takes [m_{<k}, z] as context, so z informs every conditional directly.
+    For z_dim=1 this reduces to EntropyModelCondZ.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # Dim 0: conditioned on z only  (input size = z_dim)
+        self.mlp_0 = nn.Sequential(
+            nn.Linear(z_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3 * K),
+        )
+        # Dims 1..z_dim-1: conditioned on [m_{<k}, z]  (input size = k + z_dim)
+        self.cond_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(k + z_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for k in range(1, z_dim)
+        ])
+
+    @staticmethod
+    def _eval_dlm_1d(
+        x_k: torch.Tensor,     # (...)
+        params: torch.Tensor,  # (..., 3K)
+        K: int,
+    ) -> torch.Tensor:         # (...)
+        log_pi = params[..., :K]
+        mu = params[..., K:2 * K]
+        s = (params[..., 2 * K:] + 1.0).exp()  # wide init bias
+        x_e = x_k.unsqueeze(-1)                 # (..., 1)
+        upper = torch.sigmoid((x_e + 0.5 - mu) / s)
+        lower = torch.sigmoid((x_e - 0.5 - mu) / s)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        return torch.logsumexp(
+            log_pi_n + (upper - lower).clamp(min=1e-10).log(), dim=-1
+        )
+
+    def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Log q_φ(x|z) per dimension. x, z: (..., z_dim)."""
+        lp = [self._eval_dlm_1d(x[..., 0], self.mlp_0(z), self.K)]
+        for k, mlp in enumerate(self.cond_mlps, start=1):
+            context = torch.cat([x[..., :k], z], dim=-1)  # (..., k + z_dim)
+            lp.append(self._eval_dlm_1d(x[..., k], mlp(context), self.K))
+        return torch.stack(lp, dim=-1)  # (..., z_dim)
+
+    def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x, z) / math.log(2)
