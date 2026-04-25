@@ -492,3 +492,17 @@ loose. The `n_warmup_steps` and `n_qphi_steps` hyperparameters control this.
 
 **Test:** `test_v5_frozen_speaker_qphi_gap_converges` — freezes speaker,
 runs 300 warmup steps, asserts gap_final < gap_init and gap_final < 0.5 bits.
+
+---
+
+### Summary: DLM approximation floor and practical consequences
+
+Three of the five validation tests revealed a consistent **DLM approximation error of ≈ 0.27 bits per dimension**. This is an irreducible bias arising because the DLM is defined on all integers and cannot assign exactly zero mass to out-of-support values.
+
+| Finding | Test | Implication |
+|---------|------|-------------|
+| ~0.28-bit gap above H(P) for sparse P | V2 | qphi_gap will not reach 0 in practice; floor ≈ 0.27 bits/dim |
+| Zero gradient at q_φ(z/δ) < 1e-10 | V3 | Speaker cannot compress messages to values q_φ considers extremely unlikely; warm-start mitigates this |
+| Factored pays ε_DLM per dim, joint pays once | V4 | Model selection based on factored−joint NLL gap overestimates TC by ~0.27 bits; use `tc_bits` (empirical) for model selection instead |
+
+**Consequence for sweep interpretation:** When comparing `entropy_rate` across conditions, expect a baseline floor of ~0.27 bits/dim × z_dim above `H_m_empirical`. A qphi_gap persistently above ~0.3 bits indicates either a non-stationary speaker (p(m) drifts faster than q_φ tracks) or an undertrained q_φ (increase `n_warmup_steps` or `lr_qphi_mult`), not a DLM capacity failure.
