@@ -253,10 +253,33 @@ class MAPPOTrainer(nn.Module):
                 with torch.no_grad():
                     approx_kl = (mb["old_log_probs"] - new_logp).mean().item()
                     clip_frac = ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
-                    bits_per_msg = comms_per_elem.sum(dim=-1).mean().item()
                     true_bits_per_elem = self.channel.transmission_bits_per_elem(z_new, ch_info)
                     true_bits_per_msg = true_bits_per_elem.sum(dim=-1).mean().item()
                     z_norm = z_new.norm(dim=-1).mean().item()
+
+                    # Magnitude surrogate — always logged as baseline comparison.
+                    # shape: (mb, z_dim); sum over dims gives per-message cost.
+                    mag_bits_per_elem = comms_per_elem
+                    mag_bits_per_msg = mag_bits_per_elem.sum(dim=-1).mean().item()
+
+                    # P2 metrics: compute nll_log here so it can set the canonical
+                    # bits_per_msg and per-goal bits when the entropy model is active.
+                    nll_log = None
+                    if self.entropy_model is not None and m is not None:
+                        m_float_log = m.float().detach()
+                        if self.config.entropy_model_context == "A":
+                            nll_log = self.entropy_model.nll_bits(m_float_log)
+                        else:
+                            nll_log = self.entropy_model.nll_bits(m_float_log, z_new.detach())
+
+                    # Canonical bits_per_msg: prior-based when P2 active (honest rate
+                    # estimate under the learned code), magnitude otherwise.
+                    if nll_log is not None:
+                        canonical_bits_per_elem = nll_log          # (mb, z_dim)
+                        bits_per_msg = nll_log.sum(dim=-1).mean().item()
+                    else:
+                        canonical_bits_per_elem = mag_bits_per_elem
+                        bits_per_msg = mag_bits_per_msg
 
                 metrics["pg_loss"].append(pg_loss.item())
                 metrics["value_loss"].append(critic_loss.item())
@@ -265,30 +288,27 @@ class MAPPOTrainer(nn.Module):
                 metrics["clip_frac"].append(clip_frac)
                 metrics["comms_loss"].append(comms_mean.item())
                 metrics["bits_per_msg"].append(bits_per_msg)
+                metrics["mag_bits_per_msg"].append(mag_bits_per_msg)
                 metrics["true_bits_per_msg"].append(true_bits_per_msg)
                 metrics["z_norm"].append(z_norm)
 
                 with torch.no_grad():
-                    bits_per_elem = comms_per_elem.sum(dim=-1)
+                    # Per-goal bits: uses canonical source (prior-based or magnitude).
+                    per_msg_bits = canonical_bits_per_elem.sum(dim=-1)  # (mb,)
                     for g_idx in mb["goal_ids"].unique():
                         mask = mb["goal_ids"] == g_idx
                         key = f"bits_goal_{g_idx.item()}"
-                        metrics[key].append(bits_per_elem[mask].mean().item())
+                        metrics[key].append(per_msg_bits[mask].mean().item())
 
-                # P2 metrics
-                if self.entropy_model is not None and m is not None:
+                # Remaining P2 metrics (nll_log already computed above)
+                if nll_log is not None:
                     with torch.no_grad():
-                        m_float_log = m.float().detach()
-                        if self.config.entropy_model_context == "A":
-                            nll_log = self.entropy_model.nll_bits(m_float_log)
-                        else:
-                            nll_log = self.entropy_model.nll_bits(m_float_log, z_new.detach())
-                        entropy_rate = nll_log.mean().item()
+                        entropy_rate = nll_log.mean().item()          # per-element mean
                         qphi_neg_log_max = nll_log.max().item()
                         h_emp = joint_entropy_bits(m.long())
                         tc = total_correlation_bits(m.long())
                         qphi_gap = entropy_rate - h_emp
-                        bits_vs_mag = bits_per_msg - entropy_rate
+                        bits_vs_mag = mag_bits_per_msg - bits_per_msg
 
                         metrics["entropy_rate"].append(entropy_rate)
                         metrics["H_m_empirical"].append(h_emp)
@@ -297,7 +317,7 @@ class MAPPOTrainer(nn.Module):
                         metrics["qphi_neg_log_max"].append(qphi_neg_log_max)
                         metrics["bits_vs_magnitude"].append(bits_vs_mag)
 
-                        # Per-goal entropy rate
+                        # Per-goal entropy rate (prior-based, same as bits_goal_<g>)
                         nll_per_msg = nll_log.sum(dim=-1)  # (mb,)
                         for g_idx in mb["goal_ids"].unique():
                             mask = mb["goal_ids"] == g_idx

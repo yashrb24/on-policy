@@ -25,6 +25,39 @@ _GOAL_POS_TO_IDX: dict[tuple[int, int], int] = {
 
 
 # ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+
+def select_device(requested: str) -> torch.device:
+    """Return the best available device.
+
+    "auto" (default) → Apple MPS > NVIDIA CUDA > CPU, in that priority order.
+    Any explicit string (e.g. "cpu", "cuda", "cuda:1", "mps") is passed through
+    directly without probing.
+
+    Priority rationale:
+    - MPS is checked first because this codebase is primarily developed on
+      Apple M-series hardware; explicit --device cuda overrides when on a
+      GPU cluster.
+    - CUDA is checked second for NVIDIA GPU servers.
+    - CPU is the universal fallback.
+
+    MPS compatibility notes:
+    - All tensors in this codebase are float32 (MPS does not support float64).
+    - No pin_memory usage (CUDA-only feature; would error on MPS/CPU).
+    - ValueNorm.denormalize() goes .cpu().numpy() internally — safe on all devices.
+    - torch.randperm(device=mps) is supported in PyTorch >= 2.0.
+    """
+    if requested != "auto":
+        return torch.device(requested)
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+# ---------------------------------------------------------------------------
 # Seeding
 # ---------------------------------------------------------------------------
 
@@ -34,6 +67,9 @@ def set_seed(seed: int, device: torch.device) -> None:
     Covers: Python random, NumPy global, PyTorch CPU, PyTorch CUDA (if used),
     and the PYTHONHASHSEED environment variable. Also enables deterministic
     CUDA ops where possible.
+
+    MPS note: MPS ops use the CPU RNG; torch.manual_seed() above is sufficient.
+    No additional MPS-specific seed call is needed.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -58,7 +94,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exp_name", type=str, default="debug",
                    help="Experiment name; determines runs/<exp_name>/<seed>/ log path.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--device", type=str, default="auto",
+                   help="Device: 'auto' (MPS>CUDA>CPU), 'cpu', 'cuda', 'cuda:N', 'mps'.")
 
     # Rollout / training schedule
     p.add_argument("--n_envs", type=int, default=16)
@@ -166,7 +203,7 @@ _P2_COLS = [
 CSV_HEADER = [
     "update", "timestep", "mean_reward", "success_rate",
     "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
-    "comms_loss", "bits_per_msg", "true_bits_per_msg", "z_norm", "sps",
+    "comms_loss", "bits_per_msg", "mag_bits_per_msg", "true_bits_per_msg", "z_norm", "sps",
 ] + [f"bits_goal_{i}" for i in range(_N_GOALS)] + _P2_COLS
 
 
@@ -177,7 +214,8 @@ CSV_HEADER = [
 def main() -> None:
     args = parse_args()
 
-    device = torch.device(args.device)
+    device = select_device(args.device)
+    print(f"[device] using {device} (requested: {args.device})")
     set_seed(args.seed, device)
 
     # Logging setup (before any randomness is consumed by the env).
@@ -327,7 +365,8 @@ def main() -> None:
             metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
             metrics["approx_kl"], metrics["clip_frac"],
             metrics["comms_loss"], metrics["bits_per_msg"],
-            metrics["true_bits_per_msg"], metrics["z_norm"], sps,
+            metrics["mag_bits_per_msg"], metrics["true_bits_per_msg"],
+            metrics["z_norm"], sps,
         ] + per_goal_bits + p2_vals)
         csv_file.flush()
 
@@ -338,7 +377,8 @@ def main() -> None:
                 f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
                 f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
                 f"clip={metrics['clip_frac']:.2f} "
-                f"bits_surr={metrics['bits_per_msg']:.2f} "
+                f"bits={metrics['bits_per_msg']:.2f} "
+                f"bits_mag={metrics['mag_bits_per_msg']:.2f} "
                 f"bits_true={metrics['true_bits_per_msg']:.2f} "
                 f"sps={sps:.0f}"
             )
