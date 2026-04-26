@@ -39,10 +39,11 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 
 ## Current State
 
-**Phase:** 2 — Hyperparameter sweeps (P2 implementation + validation + hardening complete; awaiting sweep finish)  
-**Running:** Stage A sweep — writing to `onpolicy/envs/toyproblem/runs/sweep_stage_a` (legacy path, mid-run). Do NOT move until sweep finishes. Last checked: ~86% complete (1,867 / ~2,175 runs), PID 11556.  
-**P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). Documented in MATH.md §12 and PILLAR_P2.md §4/§5.  
-**Immediate next action:** Wait for Stage A to finish → move data to canonical path → run `report_baseline.py` + `generate_all_paper_figures` → freeze baseline_best.yaml → launch P2-A ablation.
+**Phase:** 2 → 3 transition — Stage A sweep complete; baseline frozen; P2-A ablation ready to launch  
+**Running:** Nothing. Stage A sweep complete (2175 / 2175 runs). Data at `runs/toyproblem/sweep_stage_a/` (canonical path).  
+**P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). DLM floor CDF fix applied (bin [m,m+1) not [m-0.5,m+0.5)). Prior-based bit cost active when P2 entropy model is on. Device auto-selection (MPS > CUDA > CPU) in train.py.  
+**Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. Success_rate=1.000 ± 0.000 across 5 seeds; true_bits=4.75; interior optimum (delta=1.0 ∈ (0.5,20)); Pareto-optimal (fewest bits at perfect SR).  
+**Immediate next action:** Launch P2-A ablation: `run_p2_ablation.py --stage P2-A` (115 runs, 23 configs × 5 seeds).
 
 **Directory layout (canonical, from repo root):**
 - Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
@@ -72,6 +73,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 13 (2026-04-25):** Completed Phase 2 analysis. (1) Fixed DLM floor CDF bug: all 4 `_dlm_log_prob` implementations used rounding bins [m-0.5,m+0.5) but DDCL channels use floor m=floor((z+noise)/delta), correct bins are [m,m+1) — fixed by upper=sigma((x+1-mu)/s), lower=sigma((x-mu)/s). (2) Prior-based bit cost: when P2 entropy model active, canonical bits_per_msg=-log2 q_phi(m) (learned-code rate); mag_bits_per_msg preserved for comparison. (3) Device auto-selection: select_device("auto") in train.py, MPS>CUDA>CPU. (4) Stage A sweep migration (1867->2175 runs to canonical path) + 15 figures generated (7 standard + 8 paper PDFs). (5) Baseline frozen: sd/delta=1.0/lambda=5e-4/z_dim=2, success=1.0 on 5/5 seeds, 4.75 true bits, interior optimum — saved to configs/baseline_best.yaml. Updated MATH.md §12, PILLAR_P2.md §3/§10, network.py, trainer.py, train.py, tests. All changes committed.
 
 **Session 12 (2026-04-25):** Applied 3 hardening fixes to P2 entropy model. Fix 1: mixture prior q̃_φ = (1−α)q_φ + α·Laplace(0,50) added to all 4 entropy model classes — guarantees nonzero gradient everywhere, eliminating gradient dead-zone without warm-start dependency. Fix 2: DLM scale floor s≥0.1 (was s≥0.5, which capped joint conditional probability at 0.46 and broke V4). Fix 3: context B backward loss disabled — q_φ(m|z) conditioning on z is degenerate since m=round(z/δ) is deterministic; context B is now measurement-only. Update order also corrected: q_φ forward update runs before RL step (fresher rate signal). Added 3 new validation tests (V6/V7/V8). All 47 tests pass. Mathematical basis documented in MATH.md §12 and PILLAR_P2.md §4/§5.
 

@@ -1,0 +1,66 @@
+# DDCL Toy Problem — Baseline Best Config
+#
+# Status: FROZEN after Phase 2 Stage A sweep (2175 runs, 5 seeds each).
+# Selected: 2026-04-25
+#
+# Selection criteria (all four must pass):
+#   (1) Interior optimum : PASS — delta=1.0 is interior to swept range [0.5, 20.0]
+#   (2) Statistical stab.: PASS — success_rate=1.000 ± 0.000 across all 5 seeds
+#   (3) Seed stability   : PASS — zero rank variance across seeds
+#   (4) Pareto non-dom.  : PASS — lowest true_bits (4.75) at perfect success_rate
+#                                  among all sd/nsd interior-delta configs
+#
+# Sweep summary for winning config:
+#   channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2
+#   success_rate  : 1.0000 ± 0.0000 (5 seeds)
+#   bits_per_msg  : 4.79 ± 0.65     (surrogate, Jensen UB)
+#   true_bits     : 4.75 ± 0.65     (log2(|m|+1) sum, deployment cost)
+#
+# Why this config beats alternatives:
+#   - vs delta=0.5 : delta=0.5 is at the sweep boundary (interior optimum FAIL);
+#                    delta=1.0 achieves the same perfect SR with same z_dim.
+#   - vs z_dim=3   : z_dim=2 achieves 1.0 SR with ~3 fewer bits per message;
+#                    H(G)≈1.81 bits — 2 dims is sufficient capacity.
+#   - vs lambda=0  : lambda=0 uses more bits (6.53 true) at same SR;
+#                    lambda=5e-4 is the cheapest lambda achieving 1.0 SR.
+#   - vs nsd       : sd achieves 1.0 SR at lower bit cost than nsd equivalents.
+#
+# To reproduce (run for seeds 0-4 to replicate sweep results):
+#   KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+#       python -m onpolicy.envs.toyproblem.train \
+#       --exp_name baseline_best --seed 0 --config configs/baseline_best.yaml
+#
+# Used as reference config for all Phase 3 pillar ablations.
+
+# ── Experiment identity ──────────────────────────────────────────────────────
+exp_name: baseline_best
+seed: 0                        # run with seeds {0,1,2,3,4} for statistical validity
+device: auto                   # MPS > CUDA > CPU auto-selection
+
+# ── Communication channel ────────────────────────────────────────────────────
+channel: sd                    # subtractive dithering — canonical DDCL channel
+z_dim: 2                       # 2 dims is sufficient (H(G)≈1.81 bits)
+delta: 1.0                     # interior optimum: 1.0 ∈ (0.5, 20.0) sweep range
+lambda_comms: 5.0e-4           # compression penalty; tightens allocation without SR drop
+
+# ── Network architecture ─────────────────────────────────────────────────────
+hidden_size: 64                # matched to sweep fixed value
+
+# ── Training schedule ────────────────────────────────────────────────────────
+n_envs: 16
+n_steps: 256
+total_timesteps: 1_000_000     # 244 PPO updates; plateau reached ~150 updates
+
+# ── PPO hyperparameters ──────────────────────────────────────────────────────
+lr: 3.0e-4
+clip_eps: 0.2
+update_epochs: 10
+num_minibatches: 4
+entropy_coef: 0.03
+max_grad_norm: 0.5
+gamma: 0.99
+gae_lambda: 0.95
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log_dir: runs
+log_every: 10
