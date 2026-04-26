@@ -103,7 +103,12 @@ class EntropyModelFactored(nn.Module):
     """Per-dimension Discretised Logistic Mixture prior.
 
     q_φ(m) = ∏_k q_φ_k(m_k)
-    q_φ_k(m_k) = Σ_c π_c · [σ((m_k+0.5−μ_c)/s_c) − σ((m_k−0.5−μ_c)/s_c)]
+    q_φ_k(m_k) = Σ_c π_c · [σ((m_k+1−μ_c)/s_c) − σ((m_k−μ_c)/s_c)]
+
+    Bin semantics match the actual quantiser: m = floor((z+noise)/δ), so integer
+    m is assigned all continuous mass in [m, m+1) — NOT [m−0.5, m+0.5) (rounding).
+    The floor formula σ((x+1−μ)/s) − σ((x−μ)/s) is correct; the rounding formula
+    σ((x+0.5−μ)/s) − σ((x−0.5−μ)/s) would bias μ by +0.5 relative to bin centers.
 
     Works for both discrete m.float() (forward loss: trains q_φ) and continuous
     z/δ (backward loss: grads flow to speaker via Ballé relaxation).
@@ -125,17 +130,17 @@ class EntropyModelFactored(nn.Module):
         mu: torch.Tensor,      # same shape as log_pi
         s: torch.Tensor,       # same shape as log_pi (positive)
     ) -> torch.Tensor:         # (..., z_dim)
-        """DLM log-probability per dimension."""
+        """DLM log-probability per dimension (floor bins: [x, x+1))."""
         x_e = x.unsqueeze(-1)                                         # (..., z_dim, 1)
-        upper = torch.sigmoid((x_e + 0.5 - mu) / s)                  # (..., z_dim, K)
-        lower = torch.sigmoid((x_e - 0.5 - mu) / s)                  # (..., z_dim, K)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)                  # (..., z_dim, K)
+        lower = torch.sigmoid((x_e       - mu) / s)                  # (..., z_dim, K)
         log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
         log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()  # (..., z_dim, K)
         return torch.logsumexp(log_p_k, dim=-1)                       # (..., z_dim)
 
     def log_prob(self, x: torch.Tensor) -> torch.Tensor:
         """Log q̃_φ(x) per dimension (mixture-prior). x: (..., z_dim)."""
-        # Scale floor: clamp log_s ≥ log(0.5) so s_eff ≥ 0.5; prevents DLM
+        # Scale floor: clamp log_s ≥ _S_LOG_MIN so s_eff ≥ 0.1; prevents DLM
         # from collapsing to a delta function even if log_s is driven to -∞.
         s = self.log_s.clamp(min=_S_LOG_MIN).exp()
         log_q = self._dlm_log_prob(x, self.log_pi, self.mu, s)
@@ -181,9 +186,10 @@ class EntropyModelJoint(nn.Module):
         mu: torch.Tensor,      # (..., K)  or  (K,)
         s: torch.Tensor,       # (..., K)  or  (K,)  — positive
     ) -> torch.Tensor:         # (...)
+        """DLM log-probability 1D (floor bins: [x, x+1))."""
         x_e = x.unsqueeze(-1)
-        upper = torch.sigmoid((x_e + 0.5 - mu) / s)
-        lower = torch.sigmoid((x_e - 0.5 - mu) / s)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)
+        lower = torch.sigmoid((x_e       - mu) / s)
         log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
         log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
         return torch.logsumexp(log_p_k, dim=-1)
@@ -198,7 +204,7 @@ class EntropyModelJoint(nn.Module):
             params = mlp(x[..., :k])           # (..., 3K)
             log_pi_k = params[..., :self.K]
             mu_k = params[..., self.K:2 * self.K]
-            # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.1 even if MLP output → -∞
             s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
             lp.append(self._dlm_log_prob_1d(x[..., k], log_pi_k, mu_k, s_k))
         log_q = torch.stack(lp, dim=-1)         # (..., z_dim)
@@ -236,11 +242,11 @@ class EntropyModelCondZ(nn.Module):
             params = mlp(z)                           # (..., 3K)
             log_pi_k = params[..., :self.K]
             mu_k = params[..., self.K:2 * self.K]
-            # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.1 even if MLP output → -∞
             s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
             x_e = x[..., k].unsqueeze(-1)             # (..., 1)
-            upper = torch.sigmoid((x_e + 0.5 - mu_k) / s_k)
-            lower = torch.sigmoid((x_e - 0.5 - mu_k) / s_k)
+            upper = torch.sigmoid((x_e + 1.0 - mu_k) / s_k)  # floor bin [x, x+1)
+            lower = torch.sigmoid((x_e       - mu_k) / s_k)
             log_pi_n = log_pi_k - torch.logsumexp(log_pi_k, dim=-1, keepdim=True)
             log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
             lp.append(torch.logsumexp(log_p_k, dim=-1))  # (...)
@@ -292,8 +298,8 @@ class EntropyModelJointCondZ(nn.Module):
         # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
         s = (params[..., 2 * K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
         x_e = x_k.unsqueeze(-1)                 # (..., 1)
-        upper = torch.sigmoid((x_e + 0.5 - mu) / s)
-        lower = torch.sigmoid((x_e - 0.5 - mu) / s)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)  # floor bin [x, x+1)
+        lower = torch.sigmoid((x_e       - mu) / s)
         log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
         return torch.logsumexp(
             log_pi_n + (upper - lower).clamp(min=1e-10).log(), dim=-1

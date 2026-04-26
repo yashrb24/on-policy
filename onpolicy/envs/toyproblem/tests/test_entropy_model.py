@@ -760,15 +760,17 @@ class TestHardeningFixes:
     # Fix V7: Scale floor — DLM stays well-behaved at extreme log_s
     # ------------------------------------------------------------------
     def test_v7_scale_floor_prevents_collapse(self):
-        """V7 — Scale floor: s_eff ≥ 0.5 even when log_s is driven to −∞.
+        """V7 — Scale floor: s_eff ≥ 0.1 even when log_s is driven to −∞.
 
         Without the clamp, log_s = −100 gives s ≈ 3.7e−44 → all probability
         mass collapses to a delta at the nearest integer → log q = −∞ for
         non-integer inputs (including the continuous Ballé backward z/δ) →
         NaN loss and zero gradient.
 
-        With the clamp (log_s ≥ log(0.5), i.e. s_eff ≥ 0.5), log q remains
-        finite everywhere and the gradient flows correctly.
+        With the clamp (log_s ≥ _S_LOG_MIN = log(0.1), s_eff ≥ 0.1), log q
+        remains finite everywhere and the gradient flows correctly.
+        At s=0.1 with μ at bin centre n+0.5: P(floor bin n) = σ(0.5/0.1)−σ(−0.5/0.1)
+        = 2σ(5)−1 ≈ 0.987, which is sufficient for the TC identity (Fix 2).
 
         This test also verifies the conditional models (Joint, CondZ,
         JointCondZ) via their MLP output scale bias.
@@ -816,9 +818,10 @@ class TestHardeningFixes:
     def test_v8_context_b_backward_disabled(self):
         """V8 — Context B entropy backward is disabled; speaker receives no gradient.
 
-        In context B, q_φ(m|z) conditions on z, which deterministically produces
-        m = round(z/δ). The model can trivially achieve NLL ≈ 0 by memorising
-        round(·), so it provides no meaningful compression pressure to the speaker.
+        In context B, q_φ(m|z) conditions on z. Although dithering makes m
+        non-deterministic (m = floor((z+noise)/δ)), q_φ converges to the true
+        conditional after training, driving NLL → 0 and the backward gradient
+        to the speaker → 0. No meaningful compression pressure reaches the speaker.
 
         After the fix, the backward entropy loss is silently skipped for context B
         (only context A provides a speaker gradient from the entropy path).

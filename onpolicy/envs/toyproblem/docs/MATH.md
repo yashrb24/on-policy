@@ -382,16 +382,17 @@ Each maps directly to a test in `tests/test_entropy_model.py::TestEntropyModelVa
 
 **Claim:** Σ_{m∈ℤ} q_φ(m) = 1 for any parameter setting with wide-scale init.
 
-**Why it must hold:** The DLM is defined by bin-integrating a continuous logistic
-mixture over unit intervals. For any set of parameters (log_π, μ, log_s), the
-bins partition the real line:
+**Why it must hold:** The DLM uses floor-bin semantics: integer m is assigned
+all continuous mass in [m, m+1). For any parameters (log_π, μ, log_s), these
+bins tile ℝ without overlap:
 
 ```
-Σ_{m∈ℤ} q_φ(m) = Σ_{m∈ℤ} [F(m+0.5) − F(m−0.5)] = F(+∞) − F(−∞) = 1
+Σ_{m∈ℤ} q_φ(m) = Σ_{m∈ℤ} [F(m+1) − F(m)] = F(+∞) − F(−∞) = 1
 ```
 
-where F is the mixture CDF. In practice, the sum over [-200, 200] captures
-≥ 99.9% of the mass at the wide-scale initialisation used (log_s=1, s≈e).
+where F is the mixture CDF (telescoping sum). This matches the actual quantiser
+`m = floor((z+noise)/δ)`. In practice, the sum over [-200, 200] captures ≥ 99.9%
+of the mass at the wide-scale initialisation (log_s=1, s≈e).
 
 **Test:** `test_v1_dlm_wide_normalization` — checks Σ_{m=-200}^{200} q_φ(m) ∈ [0.999, 1.001].
 
@@ -517,7 +518,7 @@ Three implementation bugs were identified and fixed after the initial P2 impleme
 
 **The root problem in detail.**
 
-The DLM computes `q_φ_k(m_k) = CDF(m_k+0.5) − CDF(m_k−0.5)` using logistic CDFs. When the model has converged to a narrow distribution (small scale s, mean μ far from m_k), both CDF values become equal in float32: `σ((m_k+0.5−μ)/s) = σ((m_k−0.5−μ)/s) = 1.0` (or both 0). The difference is below float32 precision (~1e-38) before reaching the `clamp(min=1e-10)`. At the clamp:
+The DLM computes `q_φ_k(m_k) = CDF(m_k+1) − CDF(m_k)` using logistic CDFs (floor-bin semantics: [m, m+1)). When the model has converged to a narrow distribution (small scale s, mean μ far from m_k), both CDF values become equal in float32: `σ((m_k+1−μ)/s) = σ((m_k−μ)/s) = 1.0` (or both 0). The difference is below float32 precision (~1e-38) before reaching the `clamp(min=1e-10)`. At the clamp:
 
 ```
 log q_φ ≈ log(1e-10) = −10 log(10) ≈ −23 nats ≈ −33 bits
@@ -626,7 +627,7 @@ In z_dim=4, this adds a STRUCTURAL floor of at least 4 × 1.11 = 4.44 bits to th
 
 This is negligible: the joint model can now represent near-deterministic conditionals, and the TC identity is recoverable to within 4 × 0.019 = 0.076 bits in z_dim=4.
 
-**Why not s_min = 0.01?** At s = 0.01, both DLM CDF values at x+0.5 and x−0.5 are within 10^{−20} of 0 or 1, and their difference can lose precision in float32 (which has ≈ 7 decimal digits). More practically: a near-delta prior provides near-zero gradient for messages just one unit away from the mode — Fix 1's mixture prior handles this correctly, but it is an unnecessary stress test of the stability guarantees. s = 0.1 is the smallest value that (a) preserves TC identity and (b) keeps the DLM gradient well-conditioned across the full integer range.
+**Why not s_min = 0.01?** At s = 0.01, both DLM CDF values `σ((x+1−μ)/s)` and `σ((x−μ)/s)` are within 10^{−20} of 0 or 1 near the mode, and their difference can lose precision in float32 (which has ≈ 7 decimal digits). More practically: a near-delta prior provides near-zero gradient for messages just one unit away from the mode — Fix 1's mixture prior handles this correctly, but it is an unnecessary stress test of the stability guarantees. s = 0.1 is the smallest value that (a) preserves TC identity and (b) keeps the DLM gradient well-conditioned across the full integer range.
 
 **Numerical gradient at the boundary.** At s = 0.1, the derivative of `−log q_φ` with respect to x at the half-integer boundary x = μ + 0.5 is bounded by −(1/(s × 0.987)) × logistic_density(5) ≈ −2.5. This is finite and correcty-signed, ensuring stable backpropagation.
 
@@ -646,7 +647,7 @@ The `+1.0` offset in the MLP output path centres the softplus-like output near `
 
 #### Background: what does the Ballé backward loss do?
 
-The core challenge of P2 is that `-log₂ q_φ(m)` is not differentiable with respect to z because m = round(z/δ) is a step function. The Ballé relaxation replaces the discrete m with the continuous z/δ for the backward pass only:
+The core challenge of P2 is that `-log₂ q_φ(m)` is not differentiable with respect to z because m = floor((z+noise)/δ) is a step function. The Ballé relaxation replaces the discrete m with the continuous z/δ for the backward pass only:
 
 ```
 # Backward loss — differentiable proxy; q_φ is FROZEN during this step
@@ -658,7 +659,7 @@ For the backward loss to be a meaningful rate signal, it must: (1) be high when 
 
 #### The dithering nuance
 
-In DDCL, the channel adds dither before quantisation: `u ~ Uniform(−δ/2, δ/2)`, then `m = round((z + u)/δ)`. This means m is NOT a fully deterministic function of z — there is genuine stochasticity:
+In DDCL, the channel adds dither before quantisation: `u ~ Uniform(−δ/2, δ/2)`, then `m = floor((z + u)/δ)`. This means m is NOT a fully deterministic function of z — there is genuine stochasticity:
 
 ```
 P(m = ⌊z/δ⌋ + 1 | z) = frac(z/δ)      where frac(·) is the fractional part
@@ -685,7 +686,7 @@ As the DLM converges, NLL ≈ −log₂(frac(z/δ)), which is NOT a function of 
 
 The backward gradient to the speaker is ∂(−log q_φ(z/δ | z_fixed))/∂z = (1/δ) · ∂(−log q_φ)/∂x evaluated at x = z/δ with q_φ's parameters fixed.
 
-The DLM log-density has a maximum at its mode. As q_φ(m|z) converges, the DLM mode aligns with round(z/δ), and x = z/δ sits within 0.5 of the mode. Near the mode of a peaked distribution, the density is near its maximum and the gradient ∂q_φ/∂x is small (it passes through zero AT the mode). The score ∂(−log q_φ)/∂x = −(∂q_φ/∂x)/q_φ is therefore small. In the limit q_φ → delta function at round(z/δ), the backward gradient to z → 0.
+The DLM log-density has a maximum at its mode. As q_φ(m|z) converges, the DLM μ aligns with the bin centre floor(z/δ) + 0.5, and x = z/δ sits within the home bin [floor(z/δ), floor(z/δ)+1). Near the mode (bin centre), the floor-bin density σ((x+1−μ)/s)−σ((x−μ)/s) is near its maximum and the gradient ∂q_φ/∂x is small (it passes through zero at the bin centre x = μ − 0.5). The score ∂(−log q_φ)/∂x = −(∂q_φ/∂x)/q_φ is therefore small. As q_φ → delta function at floor(z/δ), the backward gradient to z → 0.
 
 By contrast, context A's q_φ(m) is a marginal prior that does NOT adjust to the current z. When z grows, x = z/δ moves into the tails of the fixed marginal, NLL grows, and the gradient correctly signals "this is expensive."
 

@@ -14,7 +14,7 @@ The baseline DDCL communication cost uses a magnitude surrogate:
 L_comms = Σ_k log₂(|z_k|/δ + 1)
 ```
 
-This is a Jensen upper bound on true entropy (derived in `docs/MATH.md`). P2 replaces it with a learned prior `q_φ(m)` that tracks the true distribution of quantised messages `m = round(z/δ)`:
+This is a Jensen upper bound on true entropy (derived in `docs/MATH.md`). P2 replaces it with a learned prior `q_φ(m)` that tracks the true distribution of quantised messages `m = floor((z+noise)/δ)`:
 
 ```
 L_ent = E[-log₂ q_φ(m)]          # cross-entropy, upper-bounds H(m)
@@ -33,11 +33,13 @@ When `q_φ → p(m)` this equals the true Shannon entropy, giving a strictly tig
 `q_φ` is a **Discretised Logistic Mixture (DLM)**:
 
 ```
-q_φ_k(m_k) = CDF(m_k + 0.5) − CDF(m_k − 0.5)
+q_φ_k(m_k) = CDF(m_k + 1) − CDF(m_k)
 CDF(x) = Σ_c π_c · σ((x − μ_c) / s_c)
 ```
 
 where `{log π_c, μ_c, log s_c}` are the K mixture parameters per dimension k.
+
+**Bin semantics — floor, not round.** The quantiser computes `m = floor((z+noise)/δ)`, so integer m is assigned all continuous mass in the interval `[m, m+1)`. Using rounding bins `[m−0.5, m+0.5)` would be incorrect and would bias the learned μ by +0.5 relative to each bin centre. The floor formula `CDF(m+1) − CDF(m)` is correct. At convergence, the DLM component means μ settle near `n + 0.5` for integer bin n (the bin centre), not at n.
 
 **Why DLM over alternatives:**
 - **vs Laplace/Gaussian:** DLM is a universal approximator over ℤ with K components; a single Laplace is accurate only if the true distribution is unimodal and symmetric
@@ -123,7 +125,7 @@ Three variants, from most realistic to tightest bound. Only Context A is a valid
 
 ## 4. Gradient Path — Ballé-style Relaxation
 
-`-log₂ q_φ(m)` is not differentiable with respect to z because m = round(z/δ) is discrete. We use a **two-term loss** following Ballé et al. (2018):
+`-log₂ q_φ(m)` is not differentiable with respect to z because m = floor((z+noise)/δ) is discrete. We use a **two-term loss** following Ballé et al. (2018):
 
 ```
 # Forward loss: trains q_φ on actual discrete messages
@@ -141,7 +143,7 @@ Total pillar loss: `L_P2 = λ_ent · (loss_ent_fwd + loss_ent_bwd)` (both contri
 
 **Why this preserves Schuchman's theorem:** The channel forward pass (dithering, quantisation, STE) is not touched. The only change is in the loss term. Quantisation error independence is preserved.
 
-**Context B backward is disabled (implementation fix):** When `entropy_model_context == "B"`, the backward loss is skipped entirely. Context B models `q_φ(m|z)`, but since `m = round(z/δ)` is a deterministic function of z, the model can trivially achieve `NLL = 0` without the speaker changing at all. Evaluating `-log q_φ(z/δ | z_fixed)` with `z_fixed = z.detach()` creates an additional inconsistency: the gradient pushes z toward regions where the OLD z's DLM peaked, not toward genuinely lower-rate messages. **Context B is only valid as a rate measurement tool (forward loss + metrics). Only context A (unconditional marginal) provides a valid backward gradient to the speaker.** See `docs/MATH.md §12` (Fix 3) for the full derivation. Test: `test_v8_context_b_backward_disabled`.
+**Context B backward is disabled (implementation fix):** When `entropy_model_context == "B"`, the backward loss is skipped entirely. Context B models `q_φ(m|z)`. Although m = floor((z+noise)/δ) has dither-induced stochasticity, q_φ(m|z) converges to the true conditional and NLL → 0 at the continuous evaluation point z/δ — the backward gradient to the speaker → 0. Evaluating `-log q_φ(z/δ | z_fixed)` with `z_fixed = z.detach()` creates an additional inconsistency: the gradient pushes z toward regions where the OLD z's DLM peaked, not toward genuinely lower-rate messages. **Context B is only valid as a rate measurement tool (forward loss + metrics). Only context A (unconditional marginal) provides a valid backward gradient to the speaker.** See `docs/MATH.md §12` (Fix 3) for the full derivation. Test: `test_v8_context_b_backward_disabled`.
 
 **Update order fix:** The q_φ forward update now runs BEFORE the RL optimizer step. This ensures that when the backward entropy loss is computed (step 3 of each minibatch), q_φ has already tracked the current batch's message distribution. The previous order (q_φ update after RL step) trained q_φ on stale z values from a speaker that had just been modified. Timing: q_φ update → backward loss (frozen q_φ) → RL step.
 
