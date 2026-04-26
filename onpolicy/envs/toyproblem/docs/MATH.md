@@ -515,27 +515,62 @@ Three implementation bugs were identified and fixed after the initial P2 impleme
 
 ### Fix 1 — Mixture Prior (eliminates gradient dead-zone)
 
-**Problem.** The DLM assigns probability clamp(·, 1e-10) to messages far from any mixture component mean. At the clamp, log q_φ ≈ -33 bits and ∂(-log q_φ)/∂z = -(1/q_φ) · ∂q_φ/∂z ≈ 0 (numerically). The speaker receives no gradient and stops learning for rare but valid messages. Warm-start was the previous mitigation, but it is one-shot and cannot guarantee coverage of the post-RL distribution.
+**The root problem in detail.**
+
+The DLM computes `q_φ_k(m_k) = CDF(m_k+0.5) − CDF(m_k−0.5)` using logistic CDFs. When the model has converged to a narrow distribution (small scale s, mean μ far from m_k), both CDF values become equal in float32: `σ((m_k+0.5−μ)/s) = σ((m_k−0.5−μ)/s) = 1.0` (or both 0). The difference is below float32 precision (~1e-38) before reaching the `clamp(min=1e-10)`. At the clamp:
+
+```
+log q_φ ≈ log(1e-10) = −10 log(10) ≈ −23 nats ≈ −33 bits
+∂q_φ/∂z ≈ 0   (numerically, not mathematically)
+∂(-log q_φ)/∂z = -(1/q_φ) · ∂q_φ/∂z ≈ 0   ← dead zone
+```
+
+Warm-start was the previous mitigation: train q_φ on initial rollouts so its support covers the message range at the start of RL. But warm-start is one-shot and cannot guarantee coverage as the RL policy shifts the message distribution during training. Any message in a new region of the speaker's support causes a dead gradient.
 
 **Fix.** Replace q_φ with a mixture prior:
 
 ```
-q̃_φ(x) = (1−α) · q_φ(x)  +  α · Laplace(x; 0, s_flat)
+q̃_φ(x) = (1−α) · q_φ(x)  +  α · q₀(x)
 ```
 
-where α = 0.01, s_flat = 50.0 (module constants `_FLAT_ALPHA`, `_FLAT_SCALE` in `network.py`). Implemented as:
+**Why the floor distribution q₀ must be Laplace (first principles).**
 
-```
-log q̃_φ(x) = logaddexp(log q_φ(x) + log(1−α),  −|x|/s_flat − log(2s_flat) + log α)
-```
+We need a fixed q₀ satisfying:
+1. q₀(x) > 0 for ALL x ∈ ℝ (hard requirement: eliminates all dead zones)
+2. ∂(-log q₀)/∂x is rate-reducing: should push x toward smaller |x|
+3. The floor gradient must NOT grow with |x|: otherwise q₀ could dominate the learned signal at extreme values, biasing the speaker toward z=0 regardless of the task
 
-**Guarantee.** For all x ∈ ℝ:
+Evaluating candidates against criterion 3:
+
+| q₀ | ∂(−log q₀)/∂x | Gradient at |x|=100 (s=50) | Problem |
+|---|---|---|---|
+| Uniform(−M, M) | 0 inside, undefined outside | 0 → no signal | Hard cutoff: dead zone reappears at \|x\| > M |
+| Gaussian N(0, σ²) | x/σ² | 100/2500 = 0.04 — grows with \|x\| | At extreme messages, overwhelms learned signal; gradient grows without bound |
+| Cauchy(0, γ) | 2x/(x²+γ²) | 200/10000 = 0.02 — then decays | At large \|x\|, gradient → 0, providing no signal for extreme messages |
+| **Laplace(0, b)** | **sign(x)/b** | **1/50 = 0.02 — constant** | None |
+
+Laplace is the unique family (among standard distributions) with a **constant gradient magnitude** sign(x)/b that is always rate-reducing. This constant property comes from the exponential tail: `−log(exp(−|x|/b)/2b) = |x|/b + const`, and `d(|x|/b)/dx = sign(x)/b`. It is also the maximum-entropy distribution subject to a constraint on E[|x|] (the Laplace principle of maximum entropy for an L1-constrained prior), which makes it the "least opinionated" prior for a given expected message magnitude — appropriate as a neutral floor.
+
+The scale b = 50 is chosen so that:
+- b >> typical message range in the toy problem (|m| ≤ 5–10): the floor is "flat" relative to DLM peaks
+- α · q₀(±150) = 0.01 · exp(−3)/100 ≈ 5e-6: well above float32 floor, guarantees non-zero probability at extreme messages
+- The floor gradient 1/b = 0.02 nats/unit is small relative to DLM gradients near the mode (typically 0.1–1 nats/unit): the floor never dominates the learned signal
+
+**Mathematical guarantee.** For all x ∈ ℝ:
 ```
 q̃_φ(x) ≥ α · Laplace(x; 0, s_flat) = 0.01 · e^{−|x|/50} / 100 > 0
 ```
-The Laplace gradient `∂(-log q̃_φ)/∂x ≈ sign(x)/s_flat = sign(x)/50` at extreme x is small but always rate-reducing (points toward smaller |x|). Warm-start is now a useful but non-essential acceleration aid.
+The dead zone is structurally eliminated: q̃_φ is always above a computable positive floor.
 
-**Cost.** Maximum NLL overhead ≤ −log₂(α) ≈ 6.6 bits; practical overhead ≈ 0.02 bits at convergence (learned component dominates).
+**Implementation.**
+```
+log q̃_φ(x) = logaddexp(log q_φ(x) + log(1−α),  −|x|/s_flat − log(2s_flat) + log α)
+```
+Module constants: `_FLAT_ALPHA = 0.01`, `_FLAT_SCALE = 50.0`, helper `_mix_with_flat` in `network.py`.
+
+**Cost.** Maximum NLL overhead ≤ −log₂(0.01) ≈ 6.6 bits (when q_φ assigns zero probability); practical overhead ≈ 0.02 bits at convergence when q_φ has learned a reasonable distribution (the learned component dominates in the logaddexp).
+
+**Warm-start status after this fix.** Warm-start (`n_warmup_steps > 0`) is still useful as an acceleration tool: a better-initialized q_φ gives a stronger rate signal from the first RL update. But it is no longer a safety requirement. Even with `n_warmup_steps=0`, the Laplace floor prevents zero gradients.
 
 **Test.** `test_v6_mixture_prior_no_dead_zone` — verifies finite log-prob AND non-zero, direction-correct gradient at x = ±300–500 on an untrained model.
 
@@ -543,17 +578,65 @@ The Laplace gradient `∂(-log q̃_φ)/∂x ≈ sign(x)/s_flat = sign(x)/50` at 
 
 ### Fix 2 — Scale Floor (prevents DLM collapse to delta function)
 
-**Problem.** `log_s` is an unconstrained parameter. Adam can drive it to −∞, making s → 0. A Logistic(μ, 0) distribution is a delta function at μ: it assigns all mass to integers within one step of μ and exactly zero to others. This causes NaN in log q_φ for non-integer inputs (important for the backward Ballé loss which evaluates at continuous z/δ).
+**Background: what does s control?** In a Logistic distribution with location μ and scale s, the probability assigned to integer m is the area of the density between m−0.5 and m+0.5:
 
-An additional subtlety: with s = 0.5 (the previous clamp), the per-component probability at the mode is only σ(1)−σ(−1) ≈ 0.462. For joint autoregressive models, this cap prevents the conditional from expressing P(m_k|m_{<k}) > 0.46 regardless of training, breaking the TC identity (V4 test).
-
-**Fix.** Clamp `log_s ≥ _S_LOG_MIN = log(0.1)` before `exp()`, giving `s_eff ≥ 0.1`. At s = 0.1:
 ```
-P(m = μ | Logistic(μ, 0.1)) = σ(5) − σ(−5) ≈ 0.987
+P(m | Logistic(μ, s)) = σ((m + 0.5 − μ)/s) − σ((m − 0.5 − μ)/s)
 ```
-which allows the joint model to express near-deterministic conditionals while remaining numerically stable (gradient at half-integer x is −2.5, bounded and correct).
 
-For values |x − μ| ≥ 5 (where the DLM still hits the internal 1e-10 clamp), Fix 1 (mixture prior) covers the residual probability mass with a well-behaved Laplace gradient.
+For the modal integer (m = μ, assuming μ is an integer) this simplifies using σ(−x) = 1−σ(x):
+
+```
+P(mode | s) = σ(0.5/s) − σ(−0.5/s) = 2σ(0.5/s) − 1
+```
+
+The table below shows how this varies with s:
+
+| s value | 0.5/s | P(mode) = 2σ(0.5/s)−1 | Consequence |
+|---------|-------|------------------------|-------------|
+| s → 0   | → ∞   | → 1.0                  | delta function, NaN for non-integer inputs |
+| s = 0.5 | 1.0   | 2×0.731−1 = **0.462**  | mode below 50%; model cannot express certainty |
+| s = 0.1 | 5.0   | 2×0.993−1 = **0.987**  | mode ≈ 99%; near-deterministic conditionals possible |
+| s = 0.01| 50.0  | ≈ 1.000               | near-delta; numerical edge cases in float32 |
+
+**Problem 1: unconstrained collapse.** `log_s` is an unconstrained parameter. Adam can drive `log_s → −∞`, making s → 0. A Logistic(μ, 0) is a delta function: it assigns P = 1 at μ and P = 0 everywhere else. When the backward Ballé loss evaluates at a continuous `x = z/δ` that is not exactly at an integer, the delta function returns P = 0, giving `log(0) = −∞` (NaN in practice).
+
+**Problem 2: s = 0.5 breaks the TC identity.** This was the previous clamp value. The TC identity (verified in V4) requires:
+
+```
+H_factored(m) − H_joint(m) = TC(m)   where TC ≥ 0
+```
+
+For TC ≈ 2 bits in a z_dim=4 message with high λ_comms, the speaker can learn to encode information in inter-dimensional correlations. For the joint model to capture these correlations, its autoregressive conditionals `q_φ(m_k | m_{<k})` must be able to assign near-1 probability to the correct next value — i.e., the conditional must be nearly deterministic in the dimensions where the speaker has "committed" to a specific pattern.
+
+With s = 0.5 as the floor, the maximum probability ANY single component can assign to any integer is 0.462 (the mode probability derived above). The K-component mixture cannot exceed the best single component on a single integer. Therefore:
+
+```
+H_q(m_k | m_{<k}) = −E[log₂ q(m_k | m_{<k})] ≥ −log₂(0.462) = 1.11 bits
+                                                    for all k, regardless of training
+```
+
+In z_dim=4, this adds a STRUCTURAL floor of at least 4 × 1.11 = 4.44 bits to the joint model's summed conditional NLL. The factored model's individual marginals can also be sharp (factored has no conditionals to worry about), so the factored−joint gap is structurally bounded BELOW the true TC. The V4 test confirmed: with s_min=0.5, the gap was only 1.156 bits vs. expected TC ≈ 2.0 bits — not because the model was undertrained, but because it was structurally prevented from converging.
+
+**Fix.** Clamp `log_s ≥ _S_LOG_MIN = log(0.1)` before `exp()`, giving `s_eff ≥ 0.1`. At s = 0.1, P(mode) = 0.987, so the residual conditional entropy floor is only:
+
+```
+−log₂(0.987) ≈ 0.019 bits/dim
+```
+
+This is negligible: the joint model can now represent near-deterministic conditionals, and the TC identity is recoverable to within 4 × 0.019 = 0.076 bits in z_dim=4.
+
+**Why not s_min = 0.01?** At s = 0.01, both DLM CDF values at x+0.5 and x−0.5 are within 10^{−20} of 0 or 1, and their difference can lose precision in float32 (which has ≈ 7 decimal digits). More practically: a near-delta prior provides near-zero gradient for messages just one unit away from the mode — Fix 1's mixture prior handles this correctly, but it is an unnecessary stress test of the stability guarantees. s = 0.1 is the smallest value that (a) preserves TC identity and (b) keeps the DLM gradient well-conditioned across the full integer range.
+
+**Numerical gradient at the boundary.** At s = 0.1, the derivative of `−log q_φ` with respect to x at the half-integer boundary x = μ + 0.5 is bounded by −(1/(s × 0.987)) × logistic_density(5) ≈ −2.5. This is finite and correcty-signed, ensuring stable backpropagation.
+
+**Implementation.** All four classes clamp scale before `exp()`:
+- `EntropyModelFactored`: `s = self.log_s.clamp(min=_S_LOG_MIN).exp()`
+- `EntropyModelJoint` marginal: `self.log_s_0.clamp(min=_S_LOG_MIN).exp()`
+- `EntropyModelJoint` autoregressive: `(params[..., 2K:] + 1.0).clamp(min=_S_LOG_MIN).exp()`
+- `EntropyModelCondZ`, `EntropyModelJointCondZ`: same pattern
+
+The `+1.0` offset in the MLP output path centres the softplus-like output near `s ≈ e ≈ 2.7` at initialisation, which is well above the clamp floor.
 
 **Test.** `test_v7_scale_floor_prevents_collapse` — fills `log_s = −100`, checks finite log-prob and gradient for EntropyModelFactored, EntropyModelJoint, EntropyModelCondZ.
 
@@ -561,24 +644,80 @@ For values |x − μ| ≥ 5 (where the DLM still hits the internal 1e-10 clamp),
 
 ### Fix 3 — Context B Backward Disabled
 
-**Problem.** Context B models `q_φ(m|z)`. The backward loss evaluates `-log q_φ(z/δ | z_fixed)` with `z_fixed = z.detach()`. Since `m = round(z/δ)` is a deterministic function of z, the model can learn the trivial solution:
+#### Background: what does the Ballé backward loss do?
+
+The core challenge of P2 is that `-log₂ q_φ(m)` is not differentiable with respect to z because m = round(z/δ) is a step function. The Ballé relaxation replaces the discrete m with the continuous z/δ for the backward pass only:
 
 ```
-q_φ(m|z) = 1   if m = round(z/δ)
-          = 0   otherwise
+# Backward loss — differentiable proxy; q_φ is FROZEN during this step
+loss_bwd = -log₂ q_φ(z/δ)       # context A: marginal prior
+loss_bwd = -log₂ q_φ(z/δ | z)   # context B: conditional prior (DEGENERATE)
 ```
 
-At this solution, `-log q_φ(z/δ | z) = 0` everywhere: the backward loss becomes a zero constant and provides NO gradient to the speaker. The speaker is free to increase |z| without penalty. This is a fundamental degeneracy, not a training instability — no amount of warm-start or hyperparameter tuning fixes it.
+For the backward loss to be a meaningful rate signal, it must: (1) be high when z is "expensive to communicate" (high-magnitude, spread out), and (2) decrease when the speaker reduces the communication cost. This requires that `−log q_φ(z/δ)` varies meaningfully with z and provides correct gradient direction.
 
-Furthermore, using `z.detach()` as the conditioning context while differentiating through `z_over_delta = z/δ` (which carries gradients) creates an inconsistent gradient: the model is incentivised to push z toward wherever the OLD z's DLM peaked, not toward a genuinely lower-rate region.
+#### The dithering nuance
 
-**Fix.** In `trainer.update()`, the backward entropy loss to the speaker is guarded:
+In DDCL, the channel adds dither before quantisation: `u ~ Uniform(−δ/2, δ/2)`, then `m = round((z + u)/δ)`. This means m is NOT a fully deterministic function of z — there is genuine stochasticity:
+
+```
+P(m = ⌊z/δ⌋ + 1 | z) = frac(z/δ)      where frac(·) is the fractional part
+P(m = ⌊z/δ⌋     | z) = 1 − frac(z/δ)
+```
+
+Therefore H(m|z) > 0 for all z not exactly on a quantisation boundary. Context B's FORWARD loss (training q_φ(m|z)) is valid: it learns the true dither-induced conditional, and the resulting `entropy_rate` metric correctly estimates H(m|z). The dithering does NOT save the backward loss, however, as shown below.
+
+#### Why the backward loss is still degenerate — three independent reasons
+
+**Reason 1: Convergence to near-zero NLL.**
+
+After sufficient forward-loss training, q_φ(m|z) converges toward the true dither distribution P(m|z). For typical z values not near a quantisation boundary, frac(z/δ) ≈ 0 or ≈ 1, so P(m|z) is sharply peaked: the dominant value gets probability ≥ 0.75 on average. At full convergence, q_φ has learned this distribution and NLL → −log₂(0.75+) → 0.41 bits approaching 0.
+
+More directly: the backward loss evaluates at x = z/δ (continuous). For q_φ(·|z_fixed) that has converged to P(·|z), the distribution is a two-point mass on {⌊z/δ⌋, ⌊z/δ⌋+1}. The evaluation point x = z/δ sits between these two integers. For reasonable s, the DLM assigns x = z/δ probability:
+
+```
+q_φ(z/δ | z) ≈ P(⌊z/δ⌋+1 | z) = frac(z/δ)     (the DLM density at x is dominated by adjacent integers)
+```
+
+As the DLM converges, NLL ≈ −log₂(frac(z/δ)), which is NOT a function of |z| — only of position within the quantisation cell. The speaker can increase |z| freely without changing frac(z/δ) and therefore without affecting the backward loss.
+
+**Reason 2: The gradient at convergence approaches zero.**
+
+The backward gradient to the speaker is ∂(−log q_φ(z/δ | z_fixed))/∂z = (1/δ) · ∂(−log q_φ)/∂x evaluated at x = z/δ with q_φ's parameters fixed.
+
+The DLM log-density has a maximum at its mode. As q_φ(m|z) converges, the DLM mode aligns with round(z/δ), and x = z/δ sits within 0.5 of the mode. Near the mode of a peaked distribution, the density is near its maximum and the gradient ∂q_φ/∂x is small (it passes through zero AT the mode). The score ∂(−log q_φ)/∂x = −(∂q_φ/∂x)/q_φ is therefore small. In the limit q_φ → delta function at round(z/δ), the backward gradient to z → 0.
+
+By contrast, context A's q_φ(m) is a marginal prior that does NOT adjust to the current z. When z grows, x = z/δ moves into the tails of the fixed marginal, NLL grows, and the gradient correctly signals "this is expensive."
+
+**Reason 3: Inconsistent gradient computation.**
+
+Even ignoring convergence, using `z_fixed = z.detach()` for conditioning while differentiating through `x = z/δ` creates a logical inconsistency. The MLP computing q_φ's parameters was evaluated at `z_fixed`, not at the new `z` reached after a gradient step. The gradient therefore pushes z toward regions where the OLD z's conditional was cheap — not toward regions that are genuinely cheap under the current policy. This is a staleness error that worsens with large RL step sizes.
+
+#### Summary table
+
+| Loss component | Context A | Context B |
+|---------------|-----------|-----------|
+| Forward (trains q_φ) | Valid — q_φ(m) tracks marginal | Valid — q_φ(m\|z) tracks conditional |
+| Backward (gradient to speaker) | Valid — NLL grows with \|z\|, correct signal | **DEGENERATE** — NLL → 0 at convergence, gradient → 0 |
+| Deployment realism | Realistic — q_φ is a fixed file sent to receiver | Unrealistic — receiver would need z, which IS the message |
+| Ablation role | PRIMARY loss channel | MEASUREMENT ONLY |
+
+#### Fix
+
+In `trainer.update()`, the backward entropy loss is guarded to context A only:
 
 ```python
 if (... and self.config.entropy_model_context == "A"):
-    # context B: skip — backward is degenerate
+    # context B: backward is degenerate — see MATH.md §12 Fix 3
+    z_over_delta = z_new / self.config.delta
+    for p in self.entropy_model.parameters(): p.requires_grad_(False)
+    nll_bwd = self.entropy_model.nll_bits(z_over_delta)
+    for p in self.entropy_model.parameters(): p.requires_grad_(True)
+    total_loss = total_loss + self.config.lambda_comms * nll_bwd.mean()
 ```
 
-Context B is correctly used for MEASUREMENT: its forward loss trains q_φ(m|z) and the `entropy_rate` / `qphi_gap` metrics reflect the conditional entropy H(m|z). If a speaker gradient from the entropy path is needed alongside context B measurement, the recommended approach is to run context A as the loss channel and context B as a parallel measurement-only model.
+Context B and C remain fully functional as measurement tools: their forward loss trains q_φ, and the resulting metrics (`entropy_rate`, `qphi_gap`) report the conditional entropy H(m|z) and H(m|h). These are scientifically valid measurements used to understand the communication structure — they simply cannot drive the speaker.
+
+**The same argument applies to Context C** (`q_φ(m|h_speaker)`). The hidden state h is even more informative about m than z is (h is the speaker's full internal representation at the time it computed z). Therefore q_φ(m|h) converges even faster to the true conditional, NLL → 0 even earlier, and the backward gradient vanishes even more quickly. Context C shares context B's fundamental degeneracy and is also MEASUREMENT ONLY.
 
 **Test.** `test_v8_context_b_backward_disabled` — zero RL signal, `loss_comms_mode="entropy"`: context A must change speaker params; context B must not.

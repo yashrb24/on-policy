@@ -1,7 +1,8 @@
-"""P2 systematic ablation study — 6 staged experiments, ~395 total runs.
+"""P2 systematic ablation study — 6 staged experiments, ~345 total runs.
 
 Stage ordering (each stage requires winners from prior stages):
-  P2-A  Model selection   (165 runs) — vary K, model_type, context, loss_comms_mode
+  P2-A  Model selection   (115 runs) — K × model_type × loss_comms_mode for context A (trainable);
+                                       context B measurement-only runs alongside (K=5, no speaker grad)
   P2-B  λ re-sweep         (35 runs) — P2 rate-distortion frontier; find optimal λ
   P2-C  z_dim interaction  (40 runs) — factored vs joint gap at z_dim={1,2,3}
   P2-D  δ interaction      (40 runs) — P2 gain vs quantisation width
@@ -80,28 +81,50 @@ def _run(exp_name: str, seed: int, log_dir: str, extra: dict) -> None:
 
 
 def _stage_a(args) -> Iterator[tuple[str, dict]]:
-    """Model selection: K × model_type × context × loss_comms_mode (165 runs)."""
+    """Model selection — 115 runs total (23 configs × 5 seeds).
+
+    Context A rows (20 configs): sweep K × model_type × loss_comms_mode.
+      These are the TRAINABLE configs — q_φ drives the speaker backward loss.
+    Context B rows (2 configs): K=5, loss_comms_mode=magnitude, measurement only.
+      q_φ(m|z) trains on the forward loss to produce H(m|z) metrics; the
+      speaker backward is disabled — context B cannot be an ablation winner.
+      See docs/MATH.md §12 Fix 3 for the degeneracy derivation.
+    Baseline (1 config): magnitude surrogate, no entropy model.
+
+    Grid (23 configs):
+      baseline_magnitude          : 1
+      factored × A × {entropy,both} × K{1,3,5,10,20}: 10
+      joint    × A × {entropy,both} × K{1,3,5,10,20}: 10
+      factored × B × magnitude   × K=5              : 1
+      joint    × B × magnitude   × K=5              : 1
+    """
     base = {**_SHARED, "delta": args.phase2_delta, "z_dim": args.phase2_z_dim,
             "lambda_comms": args.phase2_lambda, **_P2_TRAIN_DEFAULTS}
 
     yield "baseline_magnitude", base
 
+    # Context A: K × model_type × loss_comms_mode sweeps (trainable)
     K_values = [1, 3, 5, 10, 20]
     for K in K_values:
         for mode in ["entropy", "both"]:
             for model_type in ["factored", "joint"]:
-                for context in ["A", "B"]:
-                    # Skip (joint, B) for K != 5 to keep run count manageable;
-                    # (joint, B) K=5 is sufficient to close the 2x2 grid.
-                    if context == "B" and model_type == "joint" and K != 5:
-                        continue
-                    name = f"p2_{context}_{model_type}_K{K}_{mode}"
-                    yield name, {**base,
-                                  "use_entropy_model": "",
-                                  "entropy_model_K": str(K),
-                                  "entropy_model_type": model_type,
-                                  "entropy_model_context": context,
-                                  "loss_comms_mode": mode}
+                name = f"p2_A_{model_type}_K{K}_{mode}"
+                yield name, {**base,
+                              "use_entropy_model": "",
+                              "entropy_model_K": str(K),
+                              "entropy_model_type": model_type,
+                              "entropy_model_context": "A",
+                              "loss_comms_mode": mode}
+
+    # Context B: measurement-only (K=5, magnitude loss — no speaker backward)
+    for model_type in ["factored", "joint"]:
+        name = f"p2_B_{model_type}_K5_measurement"
+        yield name, {**base,
+                      "use_entropy_model": "",
+                      "entropy_model_K": "5",
+                      "entropy_model_type": model_type,
+                      "entropy_model_context": "B",
+                      "loss_comms_mode": "magnitude"}
 
 
 def _stage_b(args) -> Iterator[tuple[str, dict]]:

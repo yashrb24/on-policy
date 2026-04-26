@@ -85,25 +85,39 @@ where entropies are estimated from histogram counts. TC = 0 if and only if all d
 
 ## 3. Context Conditioning Options
 
-Three variants, from most realistic to tightest bound:
+Three variants, from most realistic to tightest bound. Only Context A is a valid training loss source for the speaker. Contexts B and C are **MEASUREMENT-ONLY**: they train q_φ and produce rate metrics, but their backward loss to the speaker is disabled because it is structurally degenerate (see §4 and `docs/MATH.md §12` Fix 3 for the full derivation).
 
-### Context A — Marginal prior (PRIMARY, deployment-realistic)
+### Context A — Marginal prior (PRIMARY, deployment-realistic, LOSS SOURCE)
 
 `q_φ(m)` is unconditioned. It is trained as a running parametric estimate of the marginal distribution of `m` across all time steps and episodes. The receiver needs `q_φ` at deployment (it is fixed after training); no access to z or hidden state required.
 
 **Training:** gradient on `q_φ` parameters via `-log₂ q_φ(m)` over a rollout buffer of collected `m` samples.
 
-**This is the main contribution.** Context B and C are ablations for supplementary material.
+**This is the main contribution.** Context B and C are supplementary measurements only.
 
-### Context B — Condition on z (ablation)
+**Why context A is the only valid loss source for the speaker.** When z increases in magnitude, x = z/δ moves into the tail of the marginal prior q_φ(m). Since q_φ does NOT condition on z, it cannot follow the current z — NLL grows, and the gradient correctly signals "this message is expensive." This is the desired incentive.
 
-`q_φ(m|z)` — DLM parameters produced by a small MLP from `z`. Tighter cross-entropy than A (can capture z-dependent shaping). Unrealistic at deployment because the receiver does not observe `z`. Useful as an oracle upper bound on how tight the rate signal can be.
+### Context B — Condition on z (MEASUREMENT ONLY — NOT an ablation winner candidate)
 
-### Context C — Condition on speaker hidden state (ablation)
+`q_φ(m|z)` — DLM parameters produced by a small MLP from `z`. Measures the conditional entropy H(m|z), which is tighter than the marginal H(m). Unrealistic at deployment (the receiver does not observe z; the whole point of the channel is to transmit z via m).
 
-`q_φ(m|h_speaker)` — DLM parameters from speaker hidden state. Even tighter than B (h contains history). Even less realistic. Useful to bound the information available in h that B misses.
+**Why context B CANNOT provide a valid speaker gradient.** In DDCL with dithering, m is not perfectly deterministic given z (there is dither-induced stochasticity), but after training q_φ(m|z) converges to the true conditional. At convergence, NLL → 0 bits and the gradient to z → 0. The speaker can increase |z| freely without changing NLL because q_φ always "knows" what m will be from z. See `docs/MATH.md §12` Fix 3 for the three-reason derivation.
 
-**Comparison purpose:** rank the three by: `entropy_rate_A ≥ entropy_rate_B ≥ entropy_rate_C ≥ H(m)`. The gap A−B quantifies the mutual information `I(z; m)` (beyond what the prior knows). The gap B−C quantifies the extra information in h beyond z.
+**Correct use:** run as a parallel measurement-only model alongside context A. The metric `entropy_rate_B` ≈ H(m|z) serves as an oracle lower bound. The gap `entropy_rate_A − entropy_rate_B ≈ I(z; m)` (mutual information between the speaker output and the discrete message) is the key diagnostic: if large, the marginal prior is leaving information on the table; if near zero, context A is already near-optimal.
+
+**Implementation:** `entropy_model_context="B"`, forward loss only, backward guarded off. This is not a training-mode ablation; it is a diagnostic configuration.
+
+### Context C — Condition on speaker hidden state (MEASUREMENT ONLY — NOT an ablation winner candidate)
+
+`q_φ(m|h_speaker)` — DLM parameters from the speaker's internal hidden state. Even tighter than B because h contains the full history compressed by the speaker network. Even less realistic (h is internal to the speaker and cannot be transmitted to the receiver).
+
+**Why context C cannot provide a valid speaker gradient.** The same degeneracy as B, but more severe: h is more informative about m than z is (h is the representation from which z was computed). q_φ(m|h) converges even faster to near-zero NLL, and the backward gradient vanishes even earlier.
+
+**Correct use:** metric `entropy_rate_C` ≈ H(m|h) is a tighter oracle bound than B. The gap `entropy_rate_B − entropy_rate_C` quantifies information in h beyond z — useful for understanding the speaker's computation, not for training it.
+
+**Note:** Context C requires exposing `SpeakerNetwork` intermediate activations. Currently deferred; add `SpeakerNetwork.hidden` property when implementing.
+
+**Comparison purpose:** rank by `entropy_rate_A ≥ entropy_rate_B ≥ entropy_rate_C ≥ H(m)`. These inequalities hold because conditioning can only reduce entropy. Context B and C cannot "win" an ablation (their backward is disabled), but they set bounds that context A should approach as training improves.
 
 ---
 
@@ -238,16 +252,25 @@ All ablations produce 5-seed runs, compared on `(success_rate, entropy_rate, qph
 
 **Fixed:** `channel=sd`, `delta=Phase2_best`, `z_dim=Phase2_best`, `lambda_comms=Phase2_winner`
 
-**Purpose:** Identify best `(K, model_type, context, loss_comms_mode)` combination. Answers: does joint beat factored? Does context B meaningfully tighten the bound? How many mixture components are needed?
+**Purpose:** Identify best `(K, model_type, loss_comms_mode)` combination for context A (the only valid training context). Contexts B are run in MEASUREMENT-ONLY mode alongside to bound the rate gap. The question is: does joint beat factored? How many mixture components are needed? Does entropy-only or entropy+RL joint loss perform better?
 
-**The four model cells** form a 2×2 of (independence assumption) × (conditioning):
+**The two trainable model variants** (context A only):
 
-| | No z conditioning (deploy-realistic) | Conditioned on z (oracle) |
-|---|---|---|
-| **Factored** | `EntropyModelFactored` — Context A | `EntropyModelCondZ` — Context B |
-| **Joint (AR)** | `EntropyModelJoint` — Context A | `EntropyModelJointCondZ` — Context B |
+| | Context A — marginal prior (LOSS SOURCE) |
+|---|---|
+| **Factored** | `EntropyModelFactored` — independent dimensions |
+| **Joint (AR)** | `EntropyModelJoint` — autoregressive conditionals |
 
-The (joint, B) cell closes the 2×2 and is the tightest possible bound (autoregressive + z-conditioned). Context C (conditioned on speaker hidden state h) is deferred — requires refactoring `SpeakerNetwork` to expose intermediate activations.
+**Two measurement-only variants** (context B — NO speaker gradient, forward loss only):
+
+| | Context B — conditional prior (MEASUREMENT ONLY) |
+|---|---|
+| **Factored** | `EntropyModelCondZ` — measures H(m\|z) factored |
+| **Joint (AR)** | `EntropyModelJointCondZ` — measures H(m\|z) joint (tightest bound) |
+
+Context B variants always run alongside their context A counterpart in the same experiment (same rollout, separate q_φ network). They cannot win the ablation because they do not affect the speaker. They serve as oracle bounds: a large gap `entropy_rate_A − entropy_rate_B` indicates the marginal prior is leaving information on the table; a small gap means context A has converged near-optimally.
+
+**Why context B is NOT swept over K:** K only affects the expressiveness of q_φ(m|z). Since q_φ(m|z) is not used as a training signal, K for context B is irrelevant to RL performance. Context B always uses K=5 (sufficient to fit the dither-induced conditional). The K ablation is only meaningful for context A where q_φ's expressiveness directly affects the speaker's rate penalty signal.
 
 **Grid:**
 
@@ -256,12 +279,14 @@ The (joint, B) cell closes the 2×2 and is the tightest possible bound (autoregr
 | baseline | — | — | — | magnitude | 1 |
 | factored × A | {1,3,5,10,20} | factored | A | {entropy, both} | 10 |
 | joint × A | {1,3,5,10,20} | joint | A | {entropy, both} | 10 |
-| factored × B | {1,3,5,10,20} | factored | B | {entropy, both} | 10 |
-| joint × B | {5} | joint | B | {entropy, both} | 2 |
+| factored × B (measurement) | {5} | factored | B | magnitude | 1 |
+| joint × B (measurement) | {5} | joint | B | magnitude | 1 |
 
-Note: K ablation is skipped for (joint, B) — the K question is answered by the joint×A and factored×B rows; (joint, B) at K=5 only is sufficient to measure the full-conditioning upper bound.
+Note: Context B rows use `loss_comms_mode="magnitude"` (the baseline surrogate) for the speaker. The entropy model runs in parallel to produce measurement metrics only. This correctly separates the question "does context B improve training?" (no — it cannot) from "what does context B tell us about the rate?" (the H(m|z) bound).
 
-**Winners:** model_type*, context*, K*, loss_comms_mode* — these fix all subsequent stages.
+Total configs: 1 + 10 + 10 + 1 + 1 = 23 configs × 5 seeds = **115 runs** (reduced from 165 in the original draft, which incorrectly included context B as a training loss source).
+
+**Winners:** model_type*, K*, loss_comms_mode* from the context A rows only — these fix all subsequent stages. Context B metrics are reported in supplementary material.
 
 ---
 
