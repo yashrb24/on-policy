@@ -8,12 +8,12 @@ import torch
 from torch import nn
 
 from onpolicy.envs.toyproblem.buffer import RolloutBuffer
-from onpolicy.envs.toyproblem.channels import build_channel
+from onpolicy.envs.toyproblem.channels import build_channel, H_GOAL_BITS
 from onpolicy.envs.toyproblem.network import (
     Critic, ListenerActor, SpeakerNetwork,
     EntropyModelFactored, EntropyModelJoint,
     EntropyModelCondZ, EntropyModelJointCondZ,
-    joint_entropy_bits, total_correlation_bits,
+    joint_entropy_bits, marginal_entropies_bits, total_correlation_bits,
 )
 from onpolicy.utils.valuenorm import ValueNorm
 
@@ -73,6 +73,14 @@ class MAPPOTrainer(nn.Module):
         # P2 — Entropy model and separate q_φ optimizer
         self.entropy_model = None
         self.optim_qphi = None
+        # Companion context-B model: always created alongside context-A primary
+        # for oracle bound measurement (forward-only, no backward to speaker).
+        # Context B always uses K=5 (expressiveness beyond 5 components adds no
+        # value for measurement; see PILLAR_P2.md §10 Stage P2-A).
+        self.entropy_model_B = None
+        self.optim_qphi_B = None
+        # Warm-start final loss (NaN until warm-start runs)
+        self._warmup_bits_final: float = float("nan")
         if config.use_entropy_model:
             ctx = config.entropy_model_context
             typ = config.entropy_model_type
@@ -95,6 +103,16 @@ class MAPPOTrainer(nn.Module):
                 lr=config.lr * config.lr_qphi_mult,
                 eps=config.adam_eps,
             )
+            # Companion context-B: factored uses CondZ, joint uses JointCondZ
+            if ctx == "A":
+                _B_cls = (EntropyModelCondZ if typ == "factored"
+                          else EntropyModelJointCondZ)
+                self.entropy_model_B = _B_cls(config.z_dim, K=5).to(device)
+                self.optim_qphi_B = torch.optim.Adam(
+                    self.entropy_model_B.parameters(),
+                    lr=config.lr * config.lr_qphi_mult,
+                    eps=config.adam_eps,
+                )
 
         self._trainable = (
             list(self.speaker.parameters())
@@ -158,8 +176,16 @@ class MAPPOTrainer(nn.Module):
                 self.optim_qphi.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optim_qphi.step()
+                # Also warm-start companion context-B model
+                if self.entropy_model_B is not None:
+                    nll_B = self.entropy_model_B.nll_bits(m_float.detach(), z.detach())
+                    loss_B = nll_B.mean()
+                    self.optim_qphi_B.zero_grad(set_to_none=True)
+                    loss_B.backward()
+                    self.optim_qphi_B.step()
                 final_loss = loss.item()
                 step += 1
+        self._warmup_bits_final = final_loss
         return final_loss
 
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
@@ -195,6 +221,14 @@ class MAPPOTrainer(nn.Module):
                         self.optim_qphi.zero_grad(set_to_none=True)
                         loss_q.backward()
                         self.optim_qphi.step()
+                    # Companion context-B forward update (measurement only)
+                    if self.entropy_model_B is not None:
+                        nll_B_fwd = self.entropy_model_B.nll_bits(
+                            m_float, z_new.detach()
+                        )
+                        self.optim_qphi_B.zero_grad(set_to_none=True)
+                        nll_B_fwd.mean().backward()
+                        self.optim_qphi_B.step()
 
                 # ── Step 2: RL losses ──────────────────────────────────────────────
                 dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
@@ -251,8 +285,15 @@ class MAPPOTrainer(nn.Module):
                 # ── Step 4: RL optimizer step ──────────────────────────────────────
                 self.optim.zero_grad(set_to_none=True)
                 total_loss.backward()
+                # Capture speaker gradient norm BEFORE clipping (raw signal strength)
+                speaker_grad_norm = float(sum(
+                    p.grad.detach().norm().item() ** 2
+                    for p in self.speaker.parameters()
+                    if p.grad is not None
+                ) ** 0.5)
                 nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                 self.optim.step()
+                metrics["speaker_grad_norm"].append(speaker_grad_norm)
 
                 # ── Metrics (no_grad) ──────────────────────────────────────────────
                 with torch.no_grad():
@@ -261,6 +302,10 @@ class MAPPOTrainer(nn.Module):
                     true_bits_per_elem = self.channel.transmission_bits_per_elem(z_new, ch_info)
                     true_bits_per_msg = true_bits_per_elem.sum(dim=-1).mean().item()
                     z_norm = z_new.norm(dim=-1).mean().item()
+
+                    # Shannon gap: distance from theoretical minimum
+                    shannon_gap = true_bits_per_msg - H_GOAL_BITS
+                    bits_to_hg_ratio = true_bits_per_msg / H_GOAL_BITS
 
                     # Magnitude surrogate — always logged as baseline comparison.
                     # shape: (mb, z_dim); sum over dims gives per-message cost.
@@ -296,6 +341,9 @@ class MAPPOTrainer(nn.Module):
                 metrics["mag_bits_per_msg"].append(mag_bits_per_msg)
                 metrics["true_bits_per_msg"].append(true_bits_per_msg)
                 metrics["z_norm"].append(z_norm)
+                metrics["shannon_gap"].append(shannon_gap)
+                metrics["bits_to_hg_ratio"].append(bits_to_hg_ratio)
+                metrics["warm_start_bits_final"].append(self._warmup_bits_final)
 
                 with torch.no_grad():
                     # Per-goal bits: uses canonical source (prior-based or magnitude).
@@ -321,6 +369,33 @@ class MAPPOTrainer(nn.Module):
                         metrics["tc_bits"].append(tc)
                         metrics["qphi_neg_log_max"].append(qphi_neg_log_max)
                         metrics["bits_vs_magnitude"].append(bits_vs_mag)
+
+                        # Per-dimension marginal entropies H(m_k)
+                        h_dims = marginal_entropies_bits(m.long())
+                        for k, h_k in enumerate(h_dims):
+                            metrics[f"H_dim_{k}"].append(h_k)
+
+                        # Companion context-B oracle bound
+                        if self.entropy_model_B is not None:
+                            nll_B = self.entropy_model_B.nll_bits(
+                                m.float().detach(), z_new.detach()
+                            )
+                            entropy_rate_B = nll_B.mean().item()
+                            metrics["entropy_rate_B"].append(entropy_rate_B)
+                            metrics["context_gap_bits"].append(
+                                entropy_rate - entropy_rate_B
+                            )
+
+                        # Entropy backward loss magnitude (how strongly P2 nudges speaker)
+                        if (self.config.loss_comms_mode in ("entropy", "both")
+                                and self.config.entropy_model_context == "A"):
+                            ent_loss_mag = (
+                                self.config.lambda_comms
+                                * self.entropy_model.nll_bits(
+                                    z_new.detach() / self.config.delta
+                                ).mean()
+                            ).item()
+                            metrics["entropy_loss_magnitude"].append(ent_loss_mag)
 
                         # Per-goal entropy rate (prior-based, same as bits_goal_<g>)
                         nll_per_msg = nll_log.sum(dim=-1)  # (mb,)

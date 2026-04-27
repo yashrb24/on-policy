@@ -16,6 +16,13 @@ APPENDIX (8 figures, hyperparameter transparency):
   plot_appendix_zdim_scaling          – App G: z_dim effect on SR and bits
   plot_appendix_sd_nsd_comparison     – App H: SD vs NSD head-to-head
 
+P2 ANALYSIS (5 figures, require entropy_rate / H_dim_* columns):
+  plot_p2_shannon_gap        – true_bits − H(G) over training
+  plot_p2_qphi_gap           – q_φ model fit convergence vs DLM floor
+  plot_p2_context_bounds     – Context A vs B vs H_m_empirical bounds
+  plot_p2_per_dim_entropy    – Per-dimension H(m_k) bar chart at convergence
+  plot_p2_gradient_balance   – Speaker grad norm + entropy loss magnitude
+
 Batch entry point:
   generate_sweep_figures(df, summary, agg, out_dir)
 
@@ -1533,4 +1540,378 @@ def generate_sweep_figures(
     else:
         print("  appH SKIPPED (nsd not in data)")
 
-    print(f"\nDone. Figures in:\n  main/     → {main_dir}\n  appendix/ → {app_dir}")
+    # P2 analysis figures (only if P2 columns are present)
+    p2_dir = Path(out_dir) / "p2"
+    if "entropy_rate" in df.columns:
+        for fn, key in [
+            (plot_p2_shannon_gap,      "p2_shannon_gap"),
+            (plot_p2_qphi_gap,         "p2_qphi_gap"),
+            (plot_p2_context_bounds,   "p2_context_bounds"),
+            (plot_p2_gradient_balance, "p2_gradient_balance"),
+        ]:
+            try:
+                fig, _ = fn(df, out_dir=p2_dir)
+                plt.close(fig)
+                print(f"  {key} — OK")
+            except Exception as e:
+                print(f"  {key} FAILED: {e}")
+
+    if "entropy_rate" in summary.columns and any(
+        c.startswith("H_dim_") for c in summary.columns
+    ):
+        try:
+            fig, _ = plot_p2_per_dim_entropy(summary, out_dir=p2_dir)
+            plt.close(fig)
+            print("  p2_per_dim_entropy — OK")
+        except Exception as e:
+            print(f"  p2_per_dim_entropy FAILED: {e}")
+
+    print(f"\nDone. Figures in:\n  main/     → {main_dir}\n  appendix/ → {app_dir}\n  p2/       → {p2_dir}")
+
+
+# ---------------------------------------------------------------------------
+# P2 ANALYSIS — Shannon gap over training
+# ---------------------------------------------------------------------------
+
+def plot_p2_shannon_gap(
+    df: pd.DataFrame,
+    x_col: str = "timestep",
+    bits_col: str = "true_bits_per_msg",
+    channel_col: str = "channel",
+    smooth: int = 10,
+    title: str = "Shannon gap over training (true bits − H(G))",
+    out_dir: str | Path | None = None,
+    stem: str = "p2_shannon_gap",
+    save_path: str | Path | None = None,
+) -> tuple:
+    """P2 ANALYSIS — Shannon gap (true_bits − H(G)) over training.
+
+    Shows whether and how fast P2 closes the gap to the Shannon limit.
+    One line per (channel, config variant); shaded band = ±1 std over seeds.
+    H(G) is shown as y=0 (the x-axis represents overhead above Shannon).
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    _gap_col = "shannon_gap"
+    if _gap_col not in df.columns:
+        if bits_col in df.columns:
+            df = df.copy()
+            df[_gap_col] = df[bits_col] - H_GOAL_BITS
+        else:
+            ax.text(0.5, 0.5, "No bits data", ha="center", transform=ax.transAxes)
+            return fig, ax
+
+    ddcl_channels = ["sd", "nsd", "additive_uniform"]
+    work = df[df[channel_col].isin(ddcl_channels)].copy() if channel_col in df.columns else df.copy()
+    if work.empty:
+        ax.text(0.5, 0.5, "No DDCL data", ha="center", transform=ax.transAxes)
+        return fig, ax
+
+    # Group by channel, average over seeds
+    for ch in ddcl_channels:
+        ch_df = work[work[channel_col] == ch] if channel_col in work.columns else work
+        if ch_df.empty or x_col not in ch_df.columns:
+            continue
+        grouped = ch_df.groupby(x_col)[_gap_col]
+        m, s = grouped.mean(), grouped.std().fillna(0)
+        x = m.index.values
+        if smooth > 1 and len(m) > smooth:
+            kernel = np.ones(smooth) / smooth
+            m_plot = np.convolve(m.values, kernel, mode="valid")
+            s_plot = np.convolve(s.values, kernel, mode="valid")
+            x_plot = x[smooth - 1:]
+        else:
+            m_plot, s_plot, x_plot = m.values, s.values, x
+        color = _CHANNEL_COLORS[ch]
+        ax.plot(x_plot, m_plot, color=color, label=_CHANNEL_LABELS[ch])
+        ax.fill_between(x_plot, m_plot - s_plot, m_plot + s_plot, alpha=0.15, color=color)
+
+    ax.axhline(0, color="red", linewidth=1.3, linestyle="--",
+               label=f"H(G) = {H_GOAL_BITS:.2f} bits  (zero overhead)")
+    ax.set_xlabel("Environment steps")
+    ax.set_ylabel("true_bits/msg − H(G)  (bits)")
+    ax.set_title(title)
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+
+    if out_dir is not None:
+        _save(fig, Path(out_dir), stem)
+    elif save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# P2 ANALYSIS — qphi_gap convergence
+# ---------------------------------------------------------------------------
+
+def plot_p2_qphi_gap(
+    df: pd.DataFrame,
+    x_col: str = "timestep",
+    gap_col: str = "qphi_gap",
+    z_dim: int = 2,
+    smooth: int = 10,
+    title: str = "q_φ model fit: qphi_gap over training",
+    out_dir: str | Path | None = None,
+    stem: str = "p2_qphi_gap",
+    save_path: str | Path | None = None,
+) -> tuple:
+    """P2 ANALYSIS — qphi_gap = entropy_rate − H_m_empirical.
+
+    A converged prior should reach qphi_gap ≈ 0.27 × z_dim bits (DLM floor).
+    A gap persistently above the floor signals a training problem.
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    if gap_col not in df.columns or x_col not in df.columns:
+        ax.text(0.5, 0.5, f"No {gap_col} data", ha="center", transform=ax.transAxes)
+        return fig, ax
+
+    grouped = df.groupby(x_col)[gap_col]
+    m, s = grouped.mean(), grouped.std().fillna(0)
+    x = m.index.values
+    if smooth > 1 and len(m) > smooth:
+        kernel = np.ones(smooth) / smooth
+        m_plot = np.convolve(m.values, kernel, mode="valid")
+        s_plot = np.convolve(s.values, kernel, mode="valid")
+        x_plot = x[smooth - 1:]
+    else:
+        m_plot, s_plot, x_plot = m.values, s.values, x
+
+    ax.plot(x_plot, m_plot, color=_CHANNEL_COLORS["sd"], label="qphi_gap (mean ±1 std)")
+    ax.fill_between(x_plot, m_plot - s_plot, m_plot + s_plot, alpha=0.15,
+                    color=_CHANNEL_COLORS["sd"])
+
+    dlm_floor = 0.27 * z_dim
+    ax.axhline(dlm_floor, color="orange", linewidth=1.3, linestyle="--",
+               label=f"DLM floor ≈ {dlm_floor:.2f} bits  (irreducible, {z_dim} dims)")
+    ax.axhline(0, color="red", linewidth=0.8, linestyle=":", alpha=0.5,
+               label="Ideal (q_φ = p(m))")
+
+    ax.set_xlabel("Environment steps")
+    ax.set_ylabel("qphi_gap  (bits)")
+    ax.set_title(title)
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+
+    if out_dir is not None:
+        _save(fig, Path(out_dir), stem)
+    elif save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# P2 ANALYSIS — Context A vs B rate bounds
+# ---------------------------------------------------------------------------
+
+def plot_p2_context_bounds(
+    df: pd.DataFrame,
+    x_col: str = "timestep",
+    smooth: int = 10,
+    title: str = "Entropy rate bounds over training: A (marginal) vs B (oracle)",
+    out_dir: str | Path | None = None,
+    stem: str = "p2_context_bounds",
+    save_path: str | Path | None = None,
+) -> tuple:
+    """P2 ANALYSIS — Context A vs B rate bounds over training.
+
+    Three lines: entropy_rate (A, what we optimise), entropy_rate_B (context-B
+    oracle bound), H_m_empirical (true entropy).  context_gap = A − B ≈ I(z;m).
+    As training progresses, A should approach B (oracle).
+    """
+    _require_mpl()
+    _paper_style()
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    series = {
+        "entropy_rate":   ("Context A (marginal prior)", _CHANNEL_COLORS["sd"],    "-"),
+        "entropy_rate_B": ("Context B oracle (H(m|z))", _CHANNEL_COLORS["nsd"],   "--"),
+        "H_m_empirical":  ("H(m) empirical",             _CHANNEL_COLORS["additive_uniform"], ":"),
+    }
+    any_plotted = False
+    for col, (label, color, ls) in series.items():
+        if col not in df.columns or x_col not in df.columns:
+            continue
+        grouped = df.groupby(x_col)[col]
+        m, s = grouped.mean(), grouped.std().fillna(0)
+        x = m.index.values
+        if smooth > 1 and len(m) > smooth:
+            kernel = np.ones(smooth) / smooth
+            m_plot = np.convolve(m.values, kernel, mode="valid")
+            s_plot = np.convolve(s.values, kernel, mode="valid")
+            x_plot = x[smooth - 1:]
+        else:
+            m_plot, s_plot, x_plot = m.values, s.values, x
+        ax.plot(x_plot, m_plot, color=color, linestyle=ls, label=label)
+        ax.fill_between(x_plot, m_plot - s_plot, m_plot + s_plot,
+                        alpha=0.10, color=color)
+        any_plotted = True
+
+    if not any_plotted:
+        ax.text(0.5, 0.5, "No entropy_rate data", ha="center", transform=ax.transAxes)
+        return fig, ax
+
+    ax.axhline(H_GOAL_BITS, color="red", linewidth=1.2, linestyle="--",
+               label=f"H(G) = {H_GOAL_BITS:.2f} bits  (task entropy)")
+    ax.set_xlabel("Environment steps")
+    ax.set_ylabel("Bits / message element")
+    ax.set_title(title)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+
+    if out_dir is not None:
+        _save(fig, Path(out_dir), stem)
+    elif save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# P2 ANALYSIS — Per-dimension entropy bar chart
+# ---------------------------------------------------------------------------
+
+def plot_p2_per_dim_entropy(
+    summary: pd.DataFrame,
+    channel_col: str = "channel",
+    z_dim_fixed: int = 2,
+    title: str = "Per-dimension message entropy at convergence",
+    out_dir: str | Path | None = None,
+    stem: str = "p2_per_dim_entropy",
+    save_path: str | Path | None = None,
+) -> tuple:
+    """P2 ANALYSIS — Per-dimension H(m_k) at convergence.
+
+    Shows how information is distributed across message dimensions.  Uniform
+    H_k suggests factored encoding; concentrated H_k may benefit P1 per-channel δ.
+    """
+    _require_mpl()
+    _paper_style()
+
+    h_cols = sorted(
+        [c for c in summary.columns if c.startswith("H_dim_")],
+        key=lambda c: int(c.split("_")[-1]),
+    )
+    if not h_cols:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "No H_dim_* columns", ha="center", transform=ax.transAxes)
+        return fig, ax
+
+    work = summary.copy()
+    if "z_dim" in work.columns:
+        work = work[work["z_dim"] == z_dim_fixed]
+
+    ddcl_channels = [c for c in ["sd", "nsd", "additive_uniform"]
+                     if channel_col not in work.columns
+                     or c in work[channel_col].values]
+
+    n_dims = len(h_cols)
+    x = np.arange(n_dims)
+    width = 0.8 / max(len(ddcl_channels), 1)
+
+    fig, ax = plt.subplots(figsize=(max(5, n_dims * 1.8), 4))
+    for i, ch in enumerate(ddcl_channels):
+        ch_df = work[work[channel_col] == ch] if channel_col in work.columns else work
+        if ch_df.empty:
+            continue
+        means = [ch_df[c].mean() for c in h_cols]
+        stds  = [ch_df[c].std() for c in h_cols]
+        offset = (i - len(ddcl_channels) / 2 + 0.5) * width
+        ax.bar(x + offset, means, width * 0.9, yerr=stds,
+               color=_CHANNEL_COLORS[ch], alpha=0.85,
+               label=_CHANNEL_LABELS[ch], capsize=4)
+
+    ax.axhline(H_GOAL_BITS / n_dims, color="red", linewidth=1.2, linestyle="--",
+               label=f"H(G)/{n_dims} = {H_GOAL_BITS/n_dims:.2f} bits  (equal split)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"dim {k}" for k in range(n_dims)])
+    ax.set_ylabel("H(m_k)  (bits)")
+    ax.set_title(f"{title}  [z_dim={z_dim_fixed}]")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.2, axis="y")
+    plt.tight_layout()
+
+    if out_dir is not None:
+        _save(fig, Path(out_dir), stem)
+    elif save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# P2 ANALYSIS — Gradient balance
+# ---------------------------------------------------------------------------
+
+def plot_p2_gradient_balance(
+    df: pd.DataFrame,
+    x_col: str = "timestep",
+    grad_col: str = "speaker_grad_norm",
+    ent_col: str = "entropy_loss_magnitude",
+    smooth: int = 10,
+    title: str = "Speaker gradient norm and entropy loss magnitude over training",
+    out_dir: str | Path | None = None,
+    stem: str = "p2_gradient_balance",
+    save_path: str | Path | None = None,
+) -> tuple:
+    """P2 ANALYSIS — Gradient health diagnostic.
+
+    Two-panel: top = speaker_grad_norm (total gradient reaching the speaker);
+    bottom = entropy_loss_magnitude (λ × NLL, the P2 compression signal).
+    If entropy_loss_magnitude is orders of magnitude below the grad norm,
+    P2 is not influencing the speaker (gradient dead zone, PILLAR_P2.md §9).
+    """
+    _require_mpl()
+    _paper_style()
+    fig, axes = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+    ax_grad, ax_ent = axes
+
+    any_data = False
+    for ax, col, label, color in [
+        (ax_grad, grad_col, "Speaker grad norm (L2)", _CHANNEL_COLORS["sd"]),
+        (ax_ent,  ent_col,  "Entropy loss magnitude (λ·NLL_bwd)", _CHANNEL_COLORS["nsd"]),
+    ]:
+        if col not in df.columns or x_col not in df.columns:
+            ax.text(0.5, 0.5, f"No {col}", ha="center", transform=ax.transAxes)
+            continue
+        grouped = df.groupby(x_col)[col]
+        m, s = grouped.mean(), grouped.std().fillna(0)
+        x = m.index.values
+        if smooth > 1 and len(m) > smooth:
+            kernel = np.ones(smooth) / smooth
+            m_plot = np.convolve(m.values, kernel, mode="valid")
+            s_plot = np.convolve(s.values, kernel, mode="valid")
+            x_plot = x[smooth - 1:]
+        else:
+            m_plot, s_plot, x_plot = m.values, s.values, x
+        ax.plot(x_plot, m_plot, color=color, label=label)
+        ax.fill_between(x_plot, m_plot - s_plot, m_plot + s_plot,
+                        alpha=0.15, color=color)
+        ax.set_ylabel(label, fontsize=8)
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.2)
+        any_data = True
+
+    if not any_data:
+        plt.close(fig)
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No gradient data", ha="center", transform=ax.transAxes)
+        return fig, ax
+
+    ax_ent.set_xlabel("Environment steps")
+    axes[0].set_title(title)
+    plt.tight_layout()
+
+    if out_dir is not None:
+        _save(fig, Path(out_dir), stem)
+    elif save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    return fig, axes

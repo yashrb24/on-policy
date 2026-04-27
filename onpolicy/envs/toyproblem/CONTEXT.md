@@ -44,7 +44,8 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 **P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). DLM floor CDF fix applied (bin [m,m+1) not [m-0.5,m+0.5)). Prior-based bit cost active when P2 entropy model is on. Device auto-selection (MPS > CUDA > CPU) in train.py.  
 **Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. Success_rate=1.000 ± 0.000 across 5 seeds; true_bits=4.75; interior optimum (delta=1.0 ∈ (0.5,20)); Pareto-optimal (fewest bits at perfect SR).  
 **paper_figures.py:** Fully rewritten (10 publication-quality figures). Fig 1 uses per-channel λ-sweep trade-off curves (one line per δ, sorted by λ) so SD's dominance is visible across the entire search space, not just the best config. H(G) labelled "min. bits for SR=1". AppB annotation repositioned below tick labels.  
-**Immediate next action:** Launch P2-A ablation: `run_p2_ablation.py --stage P2-A` (115 runs, 23 configs × 5 seeds).
+**P2 metrics:** Extended — shannon_gap, bits_to_hg_ratio, warm_start_bits_final, H_dim_k, entropy_rate_B, context_gap_bits, entropy_loss_magnitude, speaker_grad_norm. Companion context-B model auto-runs alongside context-A. CSV header now dynamic via `_build_csv_header(z_dim)`.  
+**Immediate next action:** P2-A ablation sweep now RUNNING — `nohup run_p2_ablation.py --stage P2-A` (115 runs).
 
 **Directory layout (canonical, from repo root):**
 - Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
@@ -74,6 +75,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 15 (2026-04-27):** P2 metrics expansion and fig1 redesign. (1) fig1 rate-distortion: replaced background dots with per-channel λ-sweep trade-off curves (one line per δ, sorted by λ), Float32 annotation moved to top-right to avoid legend overlap, alpha 0.35. (2) New metrics in trainer.py: shannon_gap, bits_to_hg_ratio, warm_start_bits_final, H_dim_k (per-dimension empirical entropy), entropy_rate_B + context_gap_bits (companion context-B oracle), entropy_loss_magnitude, speaker_grad_norm. Added marginal_entropies_bits() to network.py. (3) Companion context-B model auto-created alongside context-A primary for oracle bound measurement in every run. (4) CSV header moved to _build_csv_header(z_dim) inside main() for dynamic H_dim_k columns. (5) Five new P2 analysis figures: p2_shannon_gap, p2_qphi_gap, p2_context_bounds, p2_per_dim_entropy, p2_gradient_balance. (6) PILLAR_P2.md §7 updated with full metrics table. 126 tests passing. P2-A sweep launching.
 
 **Session 14 (2026-04-27):** Bug fixes and paper_figures.py rewrite. (1) Fixed 3 PPO training correctness bugs: ValueNorm.update() called once per rollout not once per minibatch (40× over-update); advantage normalised per-minibatch not once before all epochs; CSV file leak — try/finally in train.py main(). (2) Minor fixes: global RNG side-effect removed from CommunicatingGoal_env.seed(); stale comment corrected in network.py; fragile positional seed pairing fixed in stats.py compare_configs(). (3) paper_figures.py fully rewritten: 10 publication-quality figures (2 main + 8 appendix), Float32 as text annotation only, H(G) on all bits axes, legends outside data area. Fig 1 updated to per-channel λ-sweep trade-off curves (one line per δ sorted by λ) so SD's dominance is visible across the entire search space. AppA H(G) labelled "min. bits for SR=1". AppB "Best: δ=…" annotation repositioned to y=0.06 with bottom=0.26. All changes committed (dcef2e4, 93ccf29, latest).
 

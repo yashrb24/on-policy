@@ -345,6 +345,22 @@ def joint_entropy_bits(m: torch.Tensor) -> float:
     return float(-(probs * np.log2(probs + 1e-12)).sum())
 
 
+def marginal_entropies_bits(m: torch.Tensor) -> list[float]:
+    """Per-dimension empirical entropy H(m_k) in bits, for k = 0..z_dim-1.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) or (batch,) — integer-valued
+
+    Returns
+    -------
+    List of length z_dim, each element H(m_k) in bits.
+    """
+    if m.ndim == 1:
+        return [_marginal_entropy_bits_1d(m)]
+    return [_marginal_entropy_bits_1d(m[:, k]) for k in range(m.shape[-1])]
+
+
 def total_correlation_bits(m: torch.Tensor) -> float:
     """Empirical total correlation TC = Σ_k H(m_k) − H(m) in bits.
 

@@ -195,16 +195,26 @@ def _setup_log_dir(args: argparse.Namespace) -> Path:
 
 _N_GOALS = len(_DEFAULT_GOALS)  # should be 6
 
-_P2_COLS = [
-    "entropy_rate", "H_m_empirical", "qphi_gap",
-    "tc_bits", "qphi_neg_log_max", "bits_vs_magnitude",
-] + [f"entropy_rate_goal_{i}" for i in range(_N_GOALS)]
 
-CSV_HEADER = [
-    "update", "timestep", "mean_reward", "success_rate",
-    "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
-    "comms_loss", "bits_per_msg", "mag_bits_per_msg", "true_bits_per_msg", "z_norm", "sps",
-] + [f"bits_goal_{i}" for i in range(_N_GOALS)] + _P2_COLS
+def _build_csv_header(z_dim: int) -> list[str]:
+    """Build the full CSV header including dynamic per-dimension columns."""
+    base = [
+        "update", "timestep", "mean_reward", "success_rate",
+        "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+        "comms_loss", "bits_per_msg", "mag_bits_per_msg", "true_bits_per_msg",
+        "z_norm", "sps", "shannon_gap", "bits_to_hg_ratio",
+    ]
+    per_goal_bits = [f"bits_goal_{i}" for i in range(_N_GOALS)]
+    p2_base = [
+        "entropy_rate", "H_m_empirical", "qphi_gap",
+        "tc_bits", "qphi_neg_log_max", "bits_vs_magnitude",
+        "entropy_rate_B", "context_gap_bits",
+        "entropy_loss_magnitude", "speaker_grad_norm",
+        "warm_start_bits_final",
+    ]
+    p2_per_dim = [f"H_dim_{k}" for k in range(z_dim)]
+    p2_per_goal = [f"entropy_rate_goal_{i}" for i in range(_N_GOALS)]
+    return base + per_goal_bits + p2_base + p2_per_dim + p2_per_goal
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +233,7 @@ def main() -> None:
     csv_path = run_dir / "metrics.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(CSV_HEADER)
+    csv_writer.writerow(_build_csv_header(args.z_dim))
 
     try:
         # Environment.
@@ -353,14 +363,26 @@ def main() -> None:
             per_goal_bits = [
                 metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
             ]
-            p2_vals = [
+            p2_base_vals = [
                 metrics.get("entropy_rate", float("nan")),
                 metrics.get("H_m_empirical", float("nan")),
                 metrics.get("qphi_gap", float("nan")),
                 metrics.get("tc_bits", float("nan")),
                 metrics.get("qphi_neg_log_max", float("nan")),
                 metrics.get("bits_vs_magnitude", float("nan")),
-            ] + [metrics.get(f"entropy_rate_goal_{i}", float("nan")) for i in range(_N_GOALS)]
+                metrics.get("entropy_rate_B", float("nan")),
+                metrics.get("context_gap_bits", float("nan")),
+                metrics.get("entropy_loss_magnitude", float("nan")),
+                metrics.get("speaker_grad_norm", float("nan")),
+                metrics.get("warm_start_bits_final", float("nan")),
+            ]
+            p2_dim_vals = [
+                metrics.get(f"H_dim_{k}", float("nan")) for k in range(args.z_dim)
+            ]
+            p2_goal_vals = [
+                metrics.get(f"entropy_rate_goal_{i}", float("nan"))
+                for i in range(_N_GOALS)
+            ]
             csv_writer.writerow([
                 update, timestep, mean_reward, success_rate,
                 metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
@@ -368,7 +390,9 @@ def main() -> None:
                 metrics["comms_loss"], metrics["bits_per_msg"],
                 metrics["mag_bits_per_msg"], metrics["true_bits_per_msg"],
                 metrics["z_norm"], sps,
-            ] + per_goal_bits + p2_vals)
+                metrics.get("shannon_gap", float("nan")),
+                metrics.get("bits_to_hg_ratio", float("nan")),
+            ] + per_goal_bits + p2_base_vals + p2_dim_vals + p2_goal_vals)
             csv_file.flush()
 
             if update % args.log_every == 0 or update == n_updates - 1:
