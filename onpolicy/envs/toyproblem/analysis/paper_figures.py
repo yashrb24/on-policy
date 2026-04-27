@@ -312,7 +312,7 @@ def plot_paper_rate_distortion(
                            s=14, color=color, marker=marker,
                            alpha=0.25, zorder=2)
 
-    # ── Layer 2: per-channel Pareto frontier (bold solid line + markers) ─────
+    # ── Layer 2: per-channel frontier — bold line + CI band + sparse markers ──
     for ch in ddcl_channels:
         ch_pf = ch_pf_map.get(ch)
         if ch_pf is None or ch_pf.empty:
@@ -320,26 +320,43 @@ def plot_paper_rate_distortion(
         color  = _CHANNEL_COLORS[ch]
         marker = _CHANNEL_MARKERS[ch]
         label  = _CHANNEL_LABELS[ch]
-        ch_sorted = ch_pf.sort_values(bits_col)
+        ch_s   = ch_pf.sort_values(bits_col)
 
-        # Solid frontier line
-        ax.plot(ch_sorted[bits_col], ch_sorted[sr_col],
+        has_n  = n_col in ch_s.columns
+        has_ci = sr_std_col in ch_s.columns and bits_std_col in ch_s.columns
+        if has_ci:
+            n_vals = ch_s[n_col].values if has_n else np.full(len(ch_s), 5)
+            yerr_arr = np.array([_sem_ci(s, n)
+                                 for s, n in zip(ch_s[sr_std_col], n_vals)])
+            xerr_arr = np.array([_sem_ci(s, n)
+                                 for s, n in zip(ch_s[bits_std_col], n_vals)])
+        else:
+            yerr_arr = xerr_arr = None
+
+        # Bold frontier line
+        ax.plot(ch_s[bits_col], ch_s[sr_col],
                 color=color, linewidth=2.0, alpha=0.9, zorder=4)
 
-        # Markers with 95% CI error bars
-        has_n = n_col in ch_pf.columns
-        if sr_std_col in ch_pf.columns and bits_std_col in ch_pf.columns:
-            n_vals = ch_pf[n_col].values if has_n else np.full(len(ch_pf), 5)
-            xerr = [_sem_ci(s, n) for s, n in zip(ch_pf[bits_std_col], n_vals)]
-            yerr = [_sem_ci(s, n) for s, n in zip(ch_pf[sr_std_col], n_vals)]
-        else:
-            xerr, yerr = None, None
+        # 95% CI shaded band on SR (visible at any density of frontier points)
+        if has_ci and yerr_arr is not None:
+            ax.fill_between(
+                ch_s[bits_col],
+                ch_s[sr_col] - yerr_arr,
+                ch_s[sr_col] + yerr_arr,
+                color=color, alpha=0.15, zorder=3,
+            )
 
+        # Sparse error-bar markers: first point, last point, and every 3rd in between
+        idx_all = np.arange(len(ch_s))
+        sparse  = sorted(set([0, len(ch_s) - 1] + list(idx_all[1:-1:3])))
+        ch_sp   = ch_s.iloc[sparse]
+        xe = xerr_arr[sparse] if xerr_arr is not None else None
+        ye = yerr_arr[sparse] if yerr_arr is not None else None
         ax.errorbar(
-            ch_pf[bits_col], ch_pf[sr_col],
-            xerr=xerr, yerr=yerr,
-            fmt=marker, color=color, markersize=8,
-            capsize=3, capthick=1.2, elinewidth=1.0,
+            ch_sp[bits_col], ch_sp[sr_col],
+            xerr=xe, yerr=ye,
+            fmt=marker, color=color, markersize=7,
+            capsize=3, capthick=1.1, elinewidth=0.9,
             label=label, zorder=5, alpha=0.95,
         )
 
@@ -397,21 +414,40 @@ def plot_paper_rate_distortion(
                     axins.scatter(grp_s[bits_col], grp_s[sr_col],
                                   s=10, color=color, marker=marker, alpha=0.25)
 
-        # Foreground: per-channel Pareto lines with error bars
+        # Foreground: per-channel frontier lines + CI band + sparse markers
         for ch in ddcl_channels:
             ch_pf = ch_pf_map.get(ch)
             if ch_pf is None or ch_pf.empty:
                 continue
-            ch_s = ch_pf.sort_values(bits_col)
+            ch_s   = ch_pf.sort_values(bits_col)
+            color  = _CHANNEL_COLORS[ch]
+            has_n  = n_col in ch_s.columns
+            if sr_std_col in ch_s.columns and bits_std_col in ch_s.columns:
+                n_v   = ch_s[n_col].values if has_n else np.full(len(ch_s), 5)
+                ye_i  = np.array([_sem_ci(s, n)
+                                  for s, n in zip(ch_s[sr_std_col], n_v)])
+                xe_i  = np.array([_sem_ci(s, n)
+                                  for s, n in zip(ch_s[bits_std_col], n_v)])
+            else:
+                ye_i = xe_i = None
+
             axins.plot(ch_s[bits_col], ch_s[sr_col],
-                       color=_CHANNEL_COLORS[ch], linewidth=1.6, alpha=0.9)
-            xerr_ins = [_sem_ci(s, 5) for s in ch_pf[bits_std_col]] if bits_std_col in ch_pf.columns else None
-            yerr_ins = [_sem_ci(s, 5) for s in ch_pf[sr_std_col]]   if sr_std_col  in ch_pf.columns else None
+                       color=color, linewidth=1.6, alpha=0.9)
+            if ye_i is not None:
+                axins.fill_between(ch_s[bits_col],
+                                   ch_s[sr_col] - ye_i,
+                                   ch_s[sr_col] + ye_i,
+                                   color=color, alpha=0.15)
+            # Sparse markers in inset: first + last only (to avoid clutter)
+            sp_idx = sorted({0, len(ch_s) - 1})
+            ch_sp  = ch_s.iloc[sp_idx]
             axins.errorbar(
-                ch_pf[bits_col], ch_pf[sr_col],
-                fmt=_CHANNEL_MARKERS[ch], color=_CHANNEL_COLORS[ch],
+                ch_sp[bits_col], ch_sp[sr_col],
+                xerr=xe_i[sp_idx] if xe_i is not None else None,
+                yerr=ye_i[sp_idx] if ye_i is not None else None,
+                fmt=_CHANNEL_MARKERS[ch], color=color,
                 markersize=5, capsize=2, capthick=0.8, elinewidth=0.7,
-                alpha=0.95, zorder=5, xerr=xerr_ins, yerr=yerr_ins,
+                alpha=0.95, zorder=5,
             )
 
         axins.axvline(H_GOAL_BITS, color="red", linewidth=1.0,
