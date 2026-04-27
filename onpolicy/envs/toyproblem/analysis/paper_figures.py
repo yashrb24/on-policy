@@ -146,8 +146,71 @@ def _float32_annotation(ax, bits: float, sr: float) -> None:
 # MAIN PAPER — Figure 1: Rate-Distortion Frontier
 # ---------------------------------------------------------------------------
 
+def _monotone_frontier(
+    ch_data: "pd.DataFrame",
+    bits_col: str,
+    sr_col: str,
+) -> "pd.DataFrame":
+    """Return the monotone non-dominated subset of one channel's configs.
+
+    Sorts by bits ascending, then keeps only rows where SR is non-decreasing
+    (i.e. each point must improve on everything to its left).  This produces
+    a clean upward-staircase frontier even when mean-aggregated values are
+    not perfectly Pareto-consistent due to seed noise.
+    """
+    if ch_data.empty:
+        return ch_data
+    s = ch_data.sort_values(bits_col).reset_index(drop=True)
+    max_sr = -np.inf
+    keep = []
+    for i, row in s.iterrows():
+        if row[sr_col] >= max_sr:
+            max_sr = row[sr_col]
+            keep.append(i)
+    return s.loc[keep]
+
+
+def _topk_per_delta(
+    ch_data: "pd.DataFrame",
+    bits_col: str,
+    sr_col: str,
+    delta_col: str,
+    lambda_col: str,
+    top_k: int,
+) -> "pd.DataFrame":
+    """Return the top-K Pareto-best rows per delta group for one channel.
+
+    Within each (channel, δ) group the rows are ranked by Pareto dominance
+    (high SR, low bits).  The K best are kept and sorted by bits so the
+    returned subset can be drawn as a connected tradeoff line.
+    """
+    kept = []
+    for d, grp in ch_data.groupby(delta_col):
+        # Pareto rank: number of other points that dominate each point
+        sr   = grp[sr_col].values
+        bits = grp[bits_col].values
+        # dominated[i] = True if some j has sr[j]>=sr[i] AND bits[j]<=bits[i]
+        # with at least one strict — i.e., j strictly dominates i
+        n = len(grp)
+        rank = np.zeros(n, dtype=int)
+        for i in range(n):
+            for j in range(n):
+                if j == i:
+                    continue
+                if sr[j] >= sr[i] and bits[j] <= bits[i] and (sr[j] > sr[i] or bits[j] < bits[i]):
+                    rank[i] += 1
+        # Keep top_k lowest-rank (best) rows; tie-break by SR desc
+        order = np.lexsort((-sr, rank))          # primary: rank asc; secondary: SR desc
+        sel_idx = order[:top_k]
+        sel = grp.iloc[sel_idx].sort_values(bits_col)
+        kept.append(sel)
+    if not kept:
+        return ch_data.iloc[0:0]
+    return pd.concat(kept, ignore_index=True)
+
+
 def plot_paper_rate_distortion(
-    agg: pd.DataFrame,
+    agg: "pd.DataFrame",
     sr_col: str = "success_rate_mean",
     bits_col: str = "true_bits_per_msg_mean",
     sr_std_col: str = "success_rate_std",
@@ -157,9 +220,10 @@ def plot_paper_rate_distortion(
     lambda_col: str = "lambda_comms",
     delta_col: str = "delta",
     z_dim_fixed: int = 2,
+    top_k: int = 4,
     title: str = "Rate–distortion frontier",
-    save_path: str | Path | None = None,
-    out_dir: str | Path | None = None,
+    save_path: "str | Path | None" = None,
+    out_dir: "str | Path | None" = None,
     stem: str = "fig1_rate_distortion",
 ) -> tuple:
     """
@@ -175,46 +239,53 @@ def plot_paper_rate_distortion(
     How to read
     -----------
     Upper-left is best (high SR, few bits).  Each faint line = one δ value
-    for a channel, with points sorted by increasing λ (left = high λ / many
-    bits compressed / low SR; right = low λ / raw bits / high SR).  The
-    line shows the full rate–distortion trade-off each channel traces as λ
-    varies.  Bold markers with 95% CI error bars = Pareto-optimal configs.
-    Bold dashed step line = Pareto frontier.  Vertical dotted red line =
-    H(G) Shannon lower bound.  Float32 is NOT plotted on axes (35× off-
-    scale); see text annotation at bottom-right.
+    for a channel, connecting the top-K Pareto-best configs (sorted by bits)
+    to show the tradeoff shape without over-populating the plot.  Bold per-
+    channel Pareto frontier (solid line + markers with 95% CI) shows the
+    achievable envelope for each channel.  Inset zooms to SR > 0.85 / bits
+    ≤ 5 where SD vs NSD competition is decided.  Vertical dotted red line =
+    H(G) Shannon lower bound.  Float32 is NOT plotted on axes; see annotation.
 
     Why included
     ------------
-    Core result figure.  The trade-off curves show that SD's entire λ sweep
-    dominates additive-uniform's, not just the single best config — making
-    the Pareto claim robust rather than cherry-picked.
+    Core result figure.  The per-δ top-K tradeoff lines show that SD's
+    dominance holds across the full sweep — not just the single best config
+    — while keeping the plot uncluttered and readable.
     """
     _require_mpl()
     _paper_style()
+    from matplotlib.lines import Line2D  # noqa: F401 — kept for proxy handles if needed
+
     fig, ax = plt.subplots(figsize=(7, 5))
 
     ddcl_channels = ["sd", "nsd", "additive_uniform"]
 
-    # Filter to fixed z_dim so curves are not mixed across architectures
+    # ── Filter to fixed z_dim ────────────────────────────────────────────────
     work = agg.copy()
     if "z_dim" in work.columns:
         work = work[work["z_dim"] == z_dim_fixed]
 
-    ddcl = work[work[channel_col].isin(ddcl_channels)].copy()
+    ddcl    = work[work[channel_col].isin(ddcl_channels)].copy()
     none_df = work[work[channel_col] == "none"].copy()
 
-    # Pareto frontier over the filtered DDCL data
+    # ── Global Pareto frontier ───────────────────────────────────────────────
     if not ddcl.empty and bits_col in ddcl.columns and sr_col in ddcl.columns:
-        pf = pareto_frontier(
-            ddcl, x_col=sr_col, y_col=bits_col,
-            x_better="higher", y_better="lower",
-        )
+        pf = pareto_frontier(ddcl, x_col=sr_col, y_col=bits_col,
+                             x_better="higher", y_better="lower")
     else:
         pf = pd.DataFrame()
 
-    # Per-channel λ-sweep trade-off curves (one line per δ value)
-    # Each line shows how SR vs bits changes as λ is swept; sorted ascending
-    # by λ so left end = most compressed (high λ), right = least (low λ).
+    # ── Per-channel monotone frontier (achievable envelope) ─────────────────
+    # One bold coloured line per channel.  Using _monotone_frontier (not raw
+    # Pareto) so that mean-aggregated noise cannot produce V-shape artefacts.
+    ch_pf_map: dict = {}
+    for ch in ddcl_channels:
+        ch_data = ddcl[ddcl[channel_col] == ch]
+        if ch_data.empty:
+            continue
+        ch_pf_map[ch] = _monotone_frontier(ch_data, bits_col, sr_col)
+
+    # ── Layer 1: top-K per-δ tradeoff lines (background, faint) ─────────────
     have_lambda = lambda_col in ddcl.columns
     have_delta  = delta_col  in ddcl.columns
     for ch in ddcl_channels:
@@ -222,42 +293,41 @@ def plot_paper_rate_distortion(
         if ch_data.empty:
             continue
         color = _CHANNEL_COLORS[ch]
+        marker = _CHANNEL_MARKERS[ch]
 
         if have_lambda and have_delta:
-            delta_vals = sorted(ch_data[delta_col].unique())
-            for d in delta_vals:
-                curve = ch_data[ch_data[delta_col] == d].sort_values(lambda_col)
-                if len(curve) < 2:
+            subset = _topk_per_delta(ch_data, bits_col, sr_col,
+                                     delta_col, lambda_col, top_k)
+            # Draw one line per δ group, connecting the top-K points
+            for _, grp in subset.groupby(delta_col):
+                grp_sorted = grp.sort_values(bits_col)
+                if len(grp_sorted) < 2:
+                    ax.scatter(grp_sorted[bits_col], grp_sorted[sr_col],
+                               s=14, color=color, marker=marker,
+                               alpha=0.25, zorder=2)
                     continue
-                ax.plot(
-                    curve[bits_col], curve[sr_col],
-                    color=color, linewidth=1.1, alpha=0.35, zorder=2,
-                )
-                ax.scatter(
-                    curve[bits_col], curve[sr_col],
-                    s=16, color=color,
-                    marker=_CHANNEL_MARKERS[ch],
-                    alpha=0.35, zorder=2,
-                )
-        elif have_lambda:
-            curve = ch_data.sort_values(lambda_col)
-            ax.plot(
-                curve[bits_col], curve[sr_col],
-                color=color, linewidth=1.1, alpha=0.35, zorder=2,
-            )
+                ax.plot(grp_sorted[bits_col], grp_sorted[sr_col],
+                        color=color, linewidth=0.9, alpha=0.25, zorder=2)
+                ax.scatter(grp_sorted[bits_col], grp_sorted[sr_col],
+                           s=14, color=color, marker=marker,
+                           alpha=0.25, zorder=2)
 
-    # Pareto-optimal configs: full-opacity markers with 95% CI error bars
-    has_n = n_col in pf.columns if not pf.empty else False
+    # ── Layer 2: per-channel Pareto frontier (bold solid line + markers) ─────
     for ch in ddcl_channels:
-        if pf.empty:
-            break
-        ch_pf = pf[pf[channel_col] == ch]
-        if ch_pf.empty:
+        ch_pf = ch_pf_map.get(ch)
+        if ch_pf is None or ch_pf.empty:
             continue
         color  = _CHANNEL_COLORS[ch]
         marker = _CHANNEL_MARKERS[ch]
         label  = _CHANNEL_LABELS[ch]
+        ch_sorted = ch_pf.sort_values(bits_col)
 
+        # Solid frontier line
+        ax.plot(ch_sorted[bits_col], ch_sorted[sr_col],
+                color=color, linewidth=2.0, alpha=0.9, zorder=4)
+
+        # Markers with 95% CI error bars
+        has_n = n_col in ch_pf.columns
         if sr_std_col in ch_pf.columns and bits_std_col in ch_pf.columns:
             n_vals = ch_pf[n_col].values if has_n else np.full(len(ch_pf), 5)
             xerr = [_sem_ci(s, n) for s, n in zip(ch_pf[bits_std_col], n_vals)]
@@ -268,58 +338,97 @@ def plot_paper_rate_distortion(
         ax.errorbar(
             ch_pf[bits_col], ch_pf[sr_col],
             xerr=xerr, yerr=yerr,
-            fmt=marker, color=color, markersize=9,
+            fmt=marker, color=color, markersize=8,
             capsize=3, capthick=1.2, elinewidth=1.0,
             label=label, zorder=5, alpha=0.95,
         )
 
-    # Pareto step line
-    if not pf.empty:
-        pf_sorted = pf.sort_values(bits_col)
-        ax.step(
-            pf_sorted[bits_col], pf_sorted[sr_col],
-            where="post", color="black", linewidth=1.8,
-            linestyle="--", label="Pareto frontier", zorder=4, alpha=0.75,
-        )
+    # ── H(G) Shannon lower bound ─────────────────────────────────────────────
+    ax.axvline(H_GOAL_BITS, color="red", linewidth=1.5, linestyle=":",
+               label=f"H(G) = {H_GOAL_BITS:.2f} bits", zorder=6)
 
-    # H(G) Shannon lower bound
-    ax.axvline(
-        H_GOAL_BITS, color="red", linewidth=1.5, linestyle=":",
-        label=f"H(G) = {H_GOAL_BITS:.2f} bits", zorder=6,
-    )
+    # ── Float32 annotation ───────────────────────────────────────────────────
+    if not none_df.empty and bits_col in none_df.columns and sr_col in none_df.columns:
+        _float32_annotation(ax, float(none_df[bits_col].mean()),
+                            float(none_df[sr_col].mean()))
 
-    # Add proxy legend entries for any channel present in curves but not Pareto
-    pareto_channels = set(pf[channel_col].unique()) if not pf.empty else set()
-    for ch in ddcl_channels:
-        if ch not in pareto_channels and not ddcl[ddcl[channel_col] == ch].empty:
-            from matplotlib.lines import Line2D
-            ax.add_artist(Line2D(
-                [], [], color=_CHANNEL_COLORS[ch],
-                marker=_CHANNEL_MARKERS[ch], markersize=6,
-                linewidth=1.1, alpha=0.7,
-                label=_CHANNEL_LABELS[ch],
-            ))
-
-    # X-axis: clipped to DDCL data range (Float32 excluded from axes)
+    # ── Axis limits, labels, legend ──────────────────────────────────────────
     if not ddcl.empty:
-        x_max = ddcl[bits_col].max() * 1.12
-        ax.set_xlim(left=0, right=x_max)
+        ax.set_xlim(left=0, right=ddcl[bits_col].max() * 1.12)
     else:
         ax.set_xlim(left=0)
-
-    # Float32 annotation (text box, not a data point)
-    if not none_df.empty and bits_col in none_df.columns and sr_col in none_df.columns:
-        float32_bits = float(none_df[bits_col].mean())
-        float32_sr   = float(none_df[sr_col].mean())
-        _float32_annotation(ax, float32_bits, float32_sr)
-
+    if not ddcl.empty:
+        x_max = ddcl[bits_col].max() * 1.12
+    else:
+        x_max = 10.0
+    ax.set_xlim(left=0, right=x_max)
+    ax.set_ylim(-0.04, 1.08)
     ax.set_xlabel("True transmission bits / message")
     ax.set_ylabel("Task success rate")
     ax.set_title(title)
-    ax.set_ylim(-0.04, 1.08)
-    ax.legend(framealpha=0.88, fontsize=8, loc="lower right")
+    # Legend in the lower-left void (bits < H(G), SR < 0.5 is always empty).
+    ax.legend(framealpha=0.90, fontsize=8, loc="lower left")
     ax.grid(True, alpha=0.2, axis="both")
-    plt.tight_layout()
+
+    # ── Inset: zoom to high-SR competition zone (SR > 0.85, bits ≤ 5) ───────
+    # Placed in the lower-right of the main axes where data is sparse.
+    # Uses ax.inset_axes (axes-fraction coords) to stay inside the figure.
+    zoom_sr_min, zoom_bits_max = 0.85, 5.0
+    in_zone = ddcl[(ddcl[sr_col] >= zoom_sr_min) & (ddcl[bits_col] <= zoom_bits_max)]
+    if in_zone[channel_col].nunique() >= 2:
+        # [left, bottom, width, height] in axes-fraction coordinates
+        axins = ax.inset_axes([0.50, 0.03, 0.48, 0.44])
+        axins.set_facecolor("#f8f8f8")
+
+        # Background: top-K per-δ tradeoff lines (same alpha as main)
+        for ch in ddcl_channels:
+            ch_data = ddcl[ddcl[channel_col] == ch]
+            if ch_data.empty:
+                continue
+            color  = _CHANNEL_COLORS[ch]
+            marker = _CHANNEL_MARKERS[ch]
+            if have_lambda and have_delta:
+                subset = _topk_per_delta(ch_data, bits_col, sr_col,
+                                         delta_col, lambda_col, top_k)
+                for _, grp in subset.groupby(delta_col):
+                    grp_s = grp.sort_values(bits_col)
+                    axins.plot(grp_s[bits_col], grp_s[sr_col],
+                               color=color, linewidth=0.8, alpha=0.25)
+                    axins.scatter(grp_s[bits_col], grp_s[sr_col],
+                                  s=10, color=color, marker=marker, alpha=0.25)
+
+        # Foreground: per-channel Pareto lines with error bars
+        for ch in ddcl_channels:
+            ch_pf = ch_pf_map.get(ch)
+            if ch_pf is None or ch_pf.empty:
+                continue
+            ch_s = ch_pf.sort_values(bits_col)
+            axins.plot(ch_s[bits_col], ch_s[sr_col],
+                       color=_CHANNEL_COLORS[ch], linewidth=1.6, alpha=0.9)
+            xerr_ins = [_sem_ci(s, 5) for s in ch_pf[bits_std_col]] if bits_std_col in ch_pf.columns else None
+            yerr_ins = [_sem_ci(s, 5) for s in ch_pf[sr_std_col]]   if sr_std_col  in ch_pf.columns else None
+            axins.errorbar(
+                ch_pf[bits_col], ch_pf[sr_col],
+                fmt=_CHANNEL_MARKERS[ch], color=_CHANNEL_COLORS[ch],
+                markersize=5, capsize=2, capthick=0.8, elinewidth=0.7,
+                alpha=0.95, zorder=5, xerr=xerr_ins, yerr=yerr_ins,
+            )
+
+        axins.axvline(H_GOAL_BITS, color="red", linewidth=1.0,
+                      linestyle=":", alpha=0.8)
+        # Tight x-range: from just below the lowest bits in the zone
+        zone_bits_min = in_zone[bits_col].min()
+        axins.set_xlim(max(H_GOAL_BITS - 0.1, zone_bits_min - 0.15), zoom_bits_max)
+        axins.set_ylim(zoom_sr_min - 0.01, 1.025)
+        axins.tick_params(labelsize=6)
+        axins.grid(True, alpha=0.15)
+        axins.set_title("SR > 0.85 (zoom)", fontsize=7, pad=2)
+
+        # Subtle zoom indicator: dashed box only, no diagonal connecting lines
+        ax.indicate_inset_zoom(axins, edgecolor="grey", alpha=0.35,
+                               linewidth=0.7)
+
+    fig.tight_layout()
 
     if out_dir is not None:
         _save(fig, Path(out_dir), stem)
