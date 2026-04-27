@@ -27,6 +27,7 @@ class MAPPOConfig:
     channel: str = "none"
     delta: float = 1.0
     delta_learnable: bool = False
+    delta_global_learnable: bool = False
     lambda_comms: float = 0.0
     # --- Entropic GMM Prior ---
     use_entropic_prior: bool = False
@@ -59,7 +60,8 @@ class MAPPOTrainer(nn.Module):
         ).to(device)
         self.critic = Critic(state_dim=4).to(device)
         self.channel = build_channel(
-            config.channel, config.delta, config.delta_learnable, config.z_dim
+            config.channel, config.delta, config.delta_learnable,
+            config.delta_global_learnable, config.z_dim
         ).to(device)
         self.value_norm = ValueNorm(input_shape=1, device=device)
 
@@ -109,7 +111,17 @@ class MAPPOTrainer(nn.Module):
         state = torch.cat([listener_pos, goal], dim=-1)
         return self.critic(state)
 
-    def update(self, buffer: RolloutBuffer, timestep: int = 0) -> dict[str, float]:
+    @staticmethod
+    def _param_grad_norm(params) -> float:
+        total = 0.0
+        for p in params:
+            if p.grad is not None:
+                total += p.grad.data.norm(2).item() ** 2
+        return total ** 0.5
+
+    def update(
+        self, buffer: RolloutBuffer, timestep: int = 0
+    ) -> tuple[dict[str, float], list[dict[str, float]]]:
         # Per-batch advantage normalization (computed once, applied to all mbs).
         adv_flat = buffer.advantages.flatten()
         adv_mean = adv_flat.mean()
@@ -126,6 +138,7 @@ class MAPPOTrainer(nn.Module):
             )
 
         metrics: dict[str, list[float]] = defaultdict(list)
+        diagnostics: list[dict[str, float]] = []
 
         for _ in range(self.config.update_epochs):
             for mb in buffer.minibatches(self.config.num_minibatches):
@@ -195,7 +208,14 @@ class MAPPOTrainer(nn.Module):
                 if self.gmm_optim is not None:
                     self.gmm_optim.zero_grad(set_to_none=True)
                 total_loss.backward()
-                nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
+
+                # Compute per-component grad norms before clipping.
+                gn_speaker  = self._param_grad_norm(self.speaker.parameters())
+                gn_listener = self._param_grad_norm(self.listener.parameters())
+                gn_critic   = self._param_grad_norm(self.critic.parameters())
+                gn_channel  = self._param_grad_norm(self.channel.parameters())
+
+                gn_total = nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                 if self.gmm_optim is not None:
                     nn.utils.clip_grad_norm_(
                         self.gmm_prior.parameters(), self.config.max_grad_norm
@@ -210,16 +230,35 @@ class MAPPOTrainer(nn.Module):
                     bits_per_msg = comms_per_elem.sum(dim=-1).mean().item()
                     z_norm = z_new.norm(dim=-1).mean().item()
 
-                metrics["pg_loss"].append(pg_loss.item())
-                metrics["value_loss"].append(critic_loss.item())
-                metrics["entropy"].append(entropy_mean.item())
+                pg_loss_val   = pg_loss.item()
+                actor_loss_val = actor_loss.item()
+                value_loss_val = critic_loss.item()
+                entropy_val   = entropy_mean.item()
+                comms_val     = comms_mean.item()
+
+                metrics["pg_loss"].append(pg_loss_val)
+                metrics["value_loss"].append(value_loss_val)
+                metrics["entropy"].append(entropy_val)
                 metrics["approx_kl"].append(approx_kl)
                 metrics["clip_frac"].append(clip_frac)
-                metrics["comms_loss"].append(comms_mean.item())
+                metrics["comms_loss"].append(comms_val)
                 metrics["bits_per_msg"].append(bits_per_msg)
                 metrics["z_norm"].append(z_norm)
                 metrics["prior_nll"].append(prior_nll_val)
                 metrics["gmm_entropy"].append(gmm_entropy_val)
                 metrics["beta"].append(beta)
 
-        return {k: float(np.mean(v)) for k, v in metrics.items()}
+                diagnostics.append({
+                    "pg_loss":          pg_loss_val,
+                    "actor_loss":       actor_loss_val,
+                    "value_loss":       value_loss_val,
+                    "entropy":          entropy_val,
+                    "comms_loss":       comms_val,
+                    "grad_norm_speaker":  gn_speaker,
+                    "grad_norm_listener": gn_listener,
+                    "grad_norm_critic":   gn_critic,
+                    "grad_norm_channel":  gn_channel,
+                    "grad_norm_total":    float(gn_total),
+                })
+
+        return {k: float(np.mean(v)) for k, v in metrics.items()}, diagnostics

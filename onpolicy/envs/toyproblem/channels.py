@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -10,7 +11,8 @@ class IdentityChannel(nn.Module):
     def __init__(
         self,
         delta: float = 1.0,
-        delta_learnable: bool = False,  
+        delta_learnable: bool = False,
+        delta_global_learnable: bool = False,
         zdim: int = 3,
     ) -> None:
         super().__init__()
@@ -34,28 +36,33 @@ class DDCL_SD(nn.Module):
     pipeline runs detached alongside it for bitrate logging and deployment
     parity (in a real system sender and receiver share eps via a common RNG).
 
-    When delta_learnable=True, delta is reparameterised as exp(log_delta) so
-    it stays positive and gradients flow through it. log_delta is shaped
-    (zdim,) giving one learnable step-size per channel dimension.
+    delta_learnable=True         → per-dim softplus(raw_delta), shape (zdim,)
+    delta_global_learnable=True  → shared scalar softplus(raw_delta), shape (1,)
+    both False                   → fixed scalar self._delta
     """
 
     def __init__(
         self,
         delta: float = 1.0,
         delta_learnable: bool = False,
+        delta_global_learnable: bool = False,
         zdim: int = 1,
     ) -> None:
         super().__init__()
         self._delta_learnable = delta_learnable
+        self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            self.log_delta = nn.Parameter(torch.randn(zdim))
+            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
+            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+        elif delta_global_learnable:
+            self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
             self._delta = delta
 
     @property
     def delta(self) -> torch.Tensor | float:
-        if self._delta_learnable:
-            return self.log_delta.exp()
+        if self._delta_learnable or self._delta_global_learnable:
+            return F.softplus(self.raw_delta)
         return self._delta
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
@@ -93,28 +100,32 @@ class DDCL_NSD(nn.Module):
     E[ẑ|z] = z exactly, so straight-through with slope 1 is an unbiased
     estimator of the expected gradient.
 
-    When delta_learnable=True, delta is reparameterised as exp(log_delta) so
-    it stays positive and gradients flow through it. log_delta is shaped
-    (zdim,) giving one learnable step-size per channel dimension.
+    delta_learnable=True         → per-dim softplus(raw_delta), shape (zdim,)
+    delta_global_learnable=True  → shared scalar softplus(raw_delta), shape (1,)
+    both False                   → fixed scalar self._delta
     """
 
     def __init__(
         self,
         delta: float = 1.0,
         delta_learnable: bool = False,
+        delta_global_learnable: bool = False,
         zdim: int = 1,
     ) -> None:
         super().__init__()
         self._delta_learnable = delta_learnable
+        self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            self.log_delta = nn.Parameter(torch.randn(zdim))
+            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+        elif delta_global_learnable:
+            self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
             self._delta = delta
 
     @property
     def delta(self) -> torch.Tensor | float:
-        if self._delta_learnable:
-            return self.log_delta.exp()
+        if self._delta_learnable or self._delta_global_learnable:
+            return F.softplus(self.raw_delta)
         return self._delta
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
@@ -141,9 +152,15 @@ def build_channel(
     name: str,
     delta: float,
     delta_learnable: bool = False,
+    delta_global_learnable: bool = False,
     zdim: int = 1,
 ) -> nn.Module:
     table = {"none": IdentityChannel, "sd": DDCL_SD, "nsd": DDCL_NSD}
     if name not in table:
         raise ValueError(f"Unknown channel {name!r}; expected one of {list(table)}")
-    return table[name](delta=delta, delta_learnable=delta_learnable, zdim=zdim)
+    return table[name](
+        delta=delta,
+        delta_learnable=delta_learnable,
+        delta_global_learnable=delta_global_learnable,
+        zdim=zdim,
+    )

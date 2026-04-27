@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd"])
     p.add_argument("--delta", type=float, default=1.0)
     p.add_argument("--delta_learnable", action="store_true")
+    p.add_argument("--delta_global_learnable", action="store_true")
     p.add_argument("--lambda_comms", type=float, default=0.0)
     p.add_argument("--use_entropic_prior", action="store_true")
     p.add_argument("--gmm_structure", type=str, default="joint",
@@ -88,6 +89,7 @@ def main() -> None:
         channel=args.channel,
         delta=args.delta,
         delta_learnable=args.delta_learnable,
+        delta_global_learnable=args.delta_global_learnable,
         lambda_comms=args.lambda_comms,
         use_entropic_prior=args.use_entropic_prior,
         gmm_structure=args.gmm_structure,
@@ -113,6 +115,17 @@ def main() -> None:
         "comms_loss", "bits_per_msg", "z_norm", "sps",
         "prior_nll", "gmm_entropy", "beta",
     ])
+
+    diag_path = log_dir / "diagnostics.csv"
+    diag_file = open(diag_path, "w", newline="")
+    diag_writer = csv.writer(diag_file)
+    diag_writer.writerow([
+        "grad_step", "update", "timestep",
+        "pg_loss", "actor_loss", "value_loss", "entropy", "comms_loss",
+        "grad_norm_speaker", "grad_norm_listener", "grad_norm_critic",
+        "grad_norm_channel", "grad_norm_total",
+    ])
+    grad_step = 0
 
     n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
 
@@ -162,7 +175,7 @@ def main() -> None:
         )
 
         timestep = (update + 1) * args.n_envs * args.n_steps
-        metrics = trainer.update(buffer, timestep=timestep)
+        metrics, step_diagnostics = trainer.update(buffer, timestep=timestep)
 
         mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
         success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
@@ -178,6 +191,16 @@ def main() -> None:
         ])
         csv_file.flush()
 
+        for d in step_diagnostics:
+            diag_writer.writerow([
+                grad_step, update, timestep,
+                d["pg_loss"], d["actor_loss"], d["value_loss"], d["entropy"], d["comms_loss"],
+                d["grad_norm_speaker"], d["grad_norm_listener"], d["grad_norm_critic"],
+                d["grad_norm_channel"], d["grad_norm_total"],
+            ])
+            grad_step += 1
+        diag_file.flush()
+
         if update % args.log_every == 0 or update == n_updates - 1:
             print(
                 f"[{update:4d}/{n_updates}] t={timestep:>8d} "
@@ -189,6 +212,7 @@ def main() -> None:
             )
 
     csv_file.close()
+    diag_file.close()
 
     # Post-training per-goal evaluation: one speaker pass per goal, no sampling.
     # Writes: goal_x, goal_y, goal_prob, z_norm, bits_channel (sd/nsd only),

@@ -49,6 +49,7 @@ def _config_from_args(ns: argparse.Namespace) -> MAPPOConfig:
         channel=ns.channel,
         delta=ns.delta,
         delta_learnable=getattr(ns, "delta_learnable", False),
+        delta_global_learnable=getattr(ns, "delta_global_learnable", False),
         lambda_comms=ns.lambda_comms,
         use_entropic_prior=getattr(ns, "use_entropic_prior", False),
         gmm_structure=getattr(ns, "gmm_structure", "joint"),
