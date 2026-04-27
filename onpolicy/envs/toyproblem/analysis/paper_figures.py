@@ -288,6 +288,18 @@ def plot_paper_rate_distortion(
         label=f"H(G) = {H_GOAL_BITS:.2f} bits", zorder=6,
     )
 
+    # Add proxy legend entries for any channel present in curves but not Pareto
+    pareto_channels = set(pf[channel_col].unique()) if not pf.empty else set()
+    for ch in ddcl_channels:
+        if ch not in pareto_channels and not ddcl[ddcl[channel_col] == ch].empty:
+            from matplotlib.lines import Line2D
+            ax.add_artist(Line2D(
+                [], [], color=_CHANNEL_COLORS[ch],
+                marker=_CHANNEL_MARKERS[ch], markersize=6,
+                linewidth=1.1, alpha=0.7,
+                label=_CHANNEL_LABELS[ch],
+            ))
+
     # X-axis: clipped to DDCL data range (Float32 excluded from axes)
     if not ddcl.empty:
         x_max = ddcl[bits_col].max() * 1.12
