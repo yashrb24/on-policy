@@ -142,6 +142,9 @@ def plot_paper_rate_distortion(
     bits_std_col: str = "true_bits_per_msg_std",
     n_col: str = "n_seeds",
     channel_col: str = "channel",
+    lambda_col: str = "lambda_comms",
+    delta_col: str = "delta",
+    z_dim_fixed: int = 2,
     title: str = "Rate–distortion frontier",
     save_path: str | Path | None = None,
     out_dir: str | Path | None = None,
@@ -159,55 +162,79 @@ def plot_paper_rate_distortion(
 
     How to read
     -----------
-    Upper-left is best (high SR, few bits).  Very faint grey dots = all
-    non-Pareto DDCL configs (search space context).  Coloured markers =
-    Pareto-optimal configs per channel, with 95% CI error bars.  Bold
-    dashed step line = Pareto frontier.  Vertical dashed red line = H(G)
-    Shannon lower bound.  Float32 is NOT plotted on axes (35× off-scale);
-    see text annotation at bottom-right.
+    Upper-left is best (high SR, few bits).  Each faint line = one δ value
+    for a channel, with points sorted by increasing λ (left = high λ / many
+    bits compressed / low SR; right = low λ / raw bits / high SR).  The
+    line shows the full rate–distortion trade-off each channel traces as λ
+    varies.  Bold markers with 95% CI error bars = Pareto-optimal configs.
+    Bold dashed step line = Pareto frontier.  Vertical dotted red line =
+    H(G) Shannon lower bound.  Float32 is NOT plotted on axes (35× off-
+    scale); see text annotation at bottom-right.
 
     Why included
     ------------
-    Core result figure.  Pareto dominance by SD over additive-uniform
-    demonstrates the Schuchman property.  Float32 omission keeps the plot
-    focused on the informative DDCL operating regime.
+    Core result figure.  The trade-off curves show that SD's entire λ sweep
+    dominates additive-uniform's, not just the single best config — making
+    the Pareto claim robust rather than cherry-picked.
     """
     _require_mpl()
     _paper_style()
     fig, ax = plt.subplots(figsize=(7, 5))
 
     ddcl_channels = ["sd", "nsd", "additive_uniform"]
-    ddcl = agg[agg[channel_col].isin(ddcl_channels)].copy()
-    none_df = agg[agg[channel_col] == "none"].copy()
 
-    # Pareto frontier (DDCL + additive only; none excluded)
+    # Filter to fixed z_dim so curves are not mixed across architectures
+    work = agg.copy()
+    if "z_dim" in work.columns:
+        work = work[work["z_dim"] == z_dim_fixed]
+
+    ddcl = work[work[channel_col].isin(ddcl_channels)].copy()
+    none_df = work[work[channel_col] == "none"].copy()
+
+    # Pareto frontier over the filtered DDCL data
     if not ddcl.empty and bits_col in ddcl.columns and sr_col in ddcl.columns:
         pf = pareto_frontier(
             ddcl, x_col=sr_col, y_col=bits_col,
             x_better="higher", y_better="lower",
         )
-        pf_index = set(pf.index)
     else:
         pf = pd.DataFrame()
-        pf_index = set()
 
-    # Background: all non-Pareto DDCL configs — per-channel colour at very
-    # low alpha so channel-segregated search-space structure is visible
-    non_pf = ddcl[~ddcl.index.isin(pf_index)]
-    if not non_pf.empty:
-        for ch in ddcl_channels:
-            ch_non_pf = non_pf[non_pf[channel_col] == ch]
-            if ch_non_pf.empty:
-                continue
-            ax.scatter(
-                ch_non_pf[bits_col], ch_non_pf[sr_col],
-                s=12, color=_CHANNEL_COLORS[ch],
-                marker=_CHANNEL_MARKERS[ch],
-                alpha=0.12, zorder=1,
-                label="_nolegend_",
+    # Per-channel λ-sweep trade-off curves (one line per δ value)
+    # Each line shows how SR vs bits changes as λ is swept; sorted ascending
+    # by λ so left end = most compressed (high λ), right = least (low λ).
+    have_lambda = lambda_col in ddcl.columns
+    have_delta  = delta_col  in ddcl.columns
+    for ch in ddcl_channels:
+        ch_data = ddcl[ddcl[channel_col] == ch]
+        if ch_data.empty:
+            continue
+        color = _CHANNEL_COLORS[ch]
+
+        if have_lambda and have_delta:
+            delta_vals = sorted(ch_data[delta_col].unique())
+            for d in delta_vals:
+                curve = ch_data[ch_data[delta_col] == d].sort_values(lambda_col)
+                if len(curve) < 2:
+                    continue
+                ax.plot(
+                    curve[bits_col], curve[sr_col],
+                    color=color, linewidth=0.9, alpha=0.28, zorder=2,
+                )
+                ax.scatter(
+                    curve[bits_col], curve[sr_col],
+                    s=14, color=color,
+                    marker=_CHANNEL_MARKERS[ch],
+                    alpha=0.28, zorder=2,
+                )
+        elif have_lambda:
+            curve = ch_data.sort_values(lambda_col)
+            ax.plot(
+                curve[bits_col], curve[sr_col],
+                color=color, linewidth=0.9, alpha=0.28, zorder=2,
             )
 
-    # Pareto configs coloured by channel, with 95% CI error bars
+    # Pareto-optimal configs: full-opacity markers with 95% CI error bars
     has_n = n_col in pf.columns if not pf.empty else False
     for ch in ddcl_channels:
         if pf.empty:
@@ -215,9 +242,9 @@ def plot_paper_rate_distortion(
         ch_pf = pf[pf[channel_col] == ch]
         if ch_pf.empty:
             continue
-        color = _CHANNEL_COLORS[ch]
+        color  = _CHANNEL_COLORS[ch]
         marker = _CHANNEL_MARKERS[ch]
-        label = _CHANNEL_LABELS[ch]
+        label  = _CHANNEL_LABELS[ch]
 
         if sr_std_col in ch_pf.columns and bits_std_col in ch_pf.columns:
             n_vals = ch_pf[n_col].values if has_n else np.full(len(ch_pf), 5)
@@ -251,7 +278,7 @@ def plot_paper_rate_distortion(
 
     # X-axis: clipped to DDCL data range (Float32 excluded from axes)
     if not ddcl.empty:
-        x_max = ddcl[bits_col].max() * 1.15
+        x_max = ddcl[bits_col].max() * 1.12
         ax.set_xlim(left=0, right=x_max)
     else:
         ax.set_xlim(left=0)
@@ -259,7 +286,7 @@ def plot_paper_rate_distortion(
     # Float32 annotation (text box, not a data point)
     if not none_df.empty and bits_col in none_df.columns and sr_col in none_df.columns:
         float32_bits = float(none_df[bits_col].mean())
-        float32_sr = float(none_df[sr_col].mean())
+        float32_sr   = float(none_df[sr_col].mean())
         _float32_annotation(ax, float32_bits, float32_sr)
 
     ax.set_xlabel("True transmission bits / message")

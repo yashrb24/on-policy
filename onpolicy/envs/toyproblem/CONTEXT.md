@@ -43,6 +43,7 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 **Running:** Nothing. Stage A sweep complete (2175 / 2175 runs). Data at `runs/toyproblem/sweep_stage_a/` (canonical path).  
 **P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). DLM floor CDF fix applied (bin [m,m+1) not [m-0.5,m+0.5)). Prior-based bit cost active when P2 entropy model is on. Device auto-selection (MPS > CUDA > CPU) in train.py.  
 **Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. Success_rate=1.000 ± 0.000 across 5 seeds; true_bits=4.75; interior optimum (delta=1.0 ∈ (0.5,20)); Pareto-optimal (fewest bits at perfect SR).  
+**paper_figures.py:** Fully rewritten (10 publication-quality figures). Fig 1 uses per-channel λ-sweep trade-off curves (one line per δ, sorted by λ) so SD's dominance is visible across the entire search space, not just the best config. H(G) labelled "min. bits for SR=1". AppB annotation repositioned below tick labels.  
 **Immediate next action:** Launch P2-A ablation: `run_p2_ablation.py --stage P2-A` (115 runs, 23 configs × 5 seeds).
 
 **Directory layout (canonical, from repo root):**
@@ -73,6 +74,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 14 (2026-04-27):** Bug fixes and paper_figures.py rewrite. (1) Fixed 3 PPO training correctness bugs: ValueNorm.update() called once per rollout not once per minibatch (40× over-update); advantage normalised per-minibatch not once before all epochs; CSV file leak — try/finally in train.py main(). (2) Minor fixes: global RNG side-effect removed from CommunicatingGoal_env.seed(); stale comment corrected in network.py; fragile positional seed pairing fixed in stats.py compare_configs(). (3) paper_figures.py fully rewritten: 10 publication-quality figures (2 main + 8 appendix), Float32 as text annotation only, H(G) on all bits axes, legends outside data area. Fig 1 updated to per-channel λ-sweep trade-off curves (one line per δ sorted by λ) so SD's dominance is visible across the entire search space. AppA H(G) labelled "min. bits for SR=1". AppB "Best: δ=…" annotation repositioned to y=0.06 with bottom=0.26. All changes committed (dcef2e4, 93ccf29, latest).
 
 **Session 13 (2026-04-25):** Completed Phase 2 analysis. (1) Fixed DLM floor CDF bug: all 4 `_dlm_log_prob` implementations used rounding bins [m-0.5,m+0.5) but DDCL channels use floor m=floor((z+noise)/delta), correct bins are [m,m+1) — fixed by upper=sigma((x+1-mu)/s), lower=sigma((x-mu)/s). (2) Prior-based bit cost: when P2 entropy model active, canonical bits_per_msg=-log2 q_phi(m) (learned-code rate); mag_bits_per_msg preserved for comparison. (3) Device auto-selection: select_device("auto") in train.py, MPS>CUDA>CPU. (4) Stage A sweep migration (1867->2175 runs to canonical path) + 15 figures generated (7 standard + 8 paper PDFs). (5) Baseline frozen: sd/delta=1.0/lambda=5e-4/z_dim=2, success=1.0 on 5/5 seeds, 4.75 true bits, interior optimum — saved to configs/baseline_best.yaml. Updated MATH.md §12, PILLAR_P2.md §3/§10, network.py, trainer.py, train.py, tests. All changes committed.
 

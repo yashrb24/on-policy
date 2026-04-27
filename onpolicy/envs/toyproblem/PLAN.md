@@ -183,7 +183,7 @@ Each figure function carries a docstring with three annotated fields:
 
 | Figure | Function | Hypothesis |
 |--------|----------|------------|
-| Fig 1 | `plot_paper_rate_distortion` | DDCL lies on the Pareto frontier; STE uses far more bits for the same SR |
+| Fig 1 | `plot_paper_rate_distortion` | DDCL lies on the Pareto frontier; SD's entire λ-sweep trade-off curve dominates additive-uniform, not just the single best config |
 | Fig 2 | `plot_paper_training_curves` | All channels converge; λ>0 trades convergence speed for compression |
 | Fig 3 | `plot_paper_per_goal_allocation` | Speaker learns -log₂(p_i) allocation without explicit supervision |
 | Fig 4 | `plot_paper_lambda_sensitivity` | Smooth rate-distortion tradeoff; knee identifies optimal λ* |
