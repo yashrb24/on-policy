@@ -163,9 +163,12 @@ class MAPPOTrainer(nn.Module):
         return final_loss
 
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
-        adv_flat = buffer.advantages.flatten()
-        adv_mean = adv_flat.mean()
-        adv_std = adv_flat.std()
+        # Update ValueNorm running statistics once with all returns in this rollout.
+        # Calling update() inside the minibatch loop would shift the normalization
+        # statistics 40× (10 epochs × 4 mbs), causing inconsistent returns_norm
+        # across minibatches and epochs within the same update.
+        all_returns = buffer.returns.reshape(-1, 1)  # (T*N, 1)
+        self.value_norm.update(all_returns)
 
         metrics: dict[str, list[float]] = defaultdict(list)
 
@@ -199,7 +202,10 @@ class MAPPOTrainer(nn.Module):
                 entropy = dist.entropy()
 
                 ratio = torch.exp(new_logp - mb["old_log_probs"])
-                adv = (mb["advantages"] - adv_mean) / (adv_std + 1e-8)
+                # Normalize per-minibatch so advantages have zero mean and unit
+                # variance within each update step, regardless of epoch number.
+                adv_mb = mb["advantages"]
+                adv = (adv_mb - adv_mb.mean()) / (adv_mb.std() + 1e-8)
 
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * adv
@@ -208,7 +214,6 @@ class MAPPOTrainer(nn.Module):
                 actor_loss = pg_loss - self.config.entropy_coef * entropy_mean
 
                 returns_mb = mb["returns"].unsqueeze(-1)
-                self.value_norm.update(returns_mb)
                 returns_norm = self.value_norm.normalize(returns_mb)
 
                 state_mb = torch.cat([mb["listener_pos"], mb["goals"]], dim=-1)

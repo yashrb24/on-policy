@@ -44,7 +44,6 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
-    from matplotlib.lines import Line2D
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
@@ -54,7 +53,7 @@ from onpolicy.envs.toyproblem.channels import (
     GOAL_OPTIMAL_BITS,
     _GOAL_PROBS,
 )
-from onpolicy.envs.toyproblem.analysis.stats import pareto_frontier, bootstrap_ci
+from onpolicy.envs.toyproblem.analysis.stats import pareto_frontier
 
 
 # ---------------------------------------------------------------------------
@@ -125,37 +124,6 @@ def _save(fig: "plt.Figure", out_dir: Path, stem: str) -> None:
 def _sem_ci(std: float, n: int, z: float = 1.96) -> float:
     """Approximate 95% CI half-width: z * std / sqrt(n)."""
     return z * std / math.sqrt(max(n, 1))
-
-
-def _best_per_channel(
-    agg: pd.DataFrame,
-    sr_col: str = "success_rate_mean",
-    bits_col: str = "true_bits_per_msg_mean",
-    channel_col: str = "channel",
-    channels: Sequence[str] = ("sd", "nsd", "additive_uniform"),
-    z_dim: int | None = None,
-) -> pd.DataFrame:
-    """Return one row per channel: the Pareto-optimal config with highest SR
-    then lowest bits.  Optionally filter to a fixed z_dim first.
-
-    Returns a DataFrame indexed by channel with all agg columns present.
-    """
-    sub = agg.copy()
-    if z_dim is not None and "z_dim" in sub.columns:
-        sub = sub[sub["z_dim"] == z_dim]
-    rows = []
-    for ch in channels:
-        ch_df = sub[sub[channel_col] == ch]
-        if ch_df.empty:
-            continue
-        # Sort: highest SR first, then lowest bits as tiebreak.
-        best = ch_df.sort_values(
-            [sr_col, bits_col], ascending=[False, True]
-        ).iloc[0]
-        rows.append(best)
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -639,11 +607,6 @@ def plot_appendix_delta_lambda_heatmap(
 
     fig, ax = plt.subplots(figsize=(9, 5))
 
-    # pcolormesh needs edges; create them from midpoints on a symlog scale.
-    # Use the actual numeric values on axes — not integer positions.
-    d_edges = np.concatenate([[deltas[0] * 0.7],
-                               (deltas[:-1] + deltas[1:]) / 2,
-                               [deltas[-1] * 1.3]])
     # For lambda we mix 0 and log-spaced values; use ordinal x-ticks instead.
     x_pos = np.arange(len(lambdas))
     y_pos = np.arange(len(deltas))

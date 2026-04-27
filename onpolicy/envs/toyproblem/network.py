@@ -295,7 +295,7 @@ class EntropyModelJointCondZ(nn.Module):
     ) -> torch.Tensor:         # (...)
         log_pi = params[..., :K]
         mu = params[..., K:2 * K]
-        # bias +1.0 → wide init; clamp ensures s ≥ 0.5 even if MLP output → -∞
+        # bias +1.0 → wide init; clamp+exp ensures s ≥ exp(_S_LOG_MIN) = 0.1
         s = (params[..., 2 * K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
         x_e = x_k.unsqueeze(-1)                 # (..., 1)
         upper = torch.sigmoid((x_e + 1.0 - mu) / s)  # floor bin [x, x+1)

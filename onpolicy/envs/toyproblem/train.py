@@ -225,169 +225,170 @@ def main() -> None:
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(CSV_HEADER)
 
-    # Environment.
-    env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
-    env.seed(args.seed)
+    try:
+        # Environment.
+        env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
+        env.seed(args.seed)
 
-    # Trainer.
-    config = MAPPOConfig(
-        z_dim=args.z_dim,
-        hidden_size=args.hidden_size,
-        lr=args.lr,
-        clip_eps=args.clip_eps,
-        entropy_coef=args.entropy_coef,
-        max_grad_norm=args.max_grad_norm,
-        update_epochs=args.update_epochs,
-        num_minibatches=args.num_minibatches,
-        channel=args.channel,
-        delta=args.delta,
-        lambda_comms=args.lambda_comms,
-        ste_clip=args.ste_clip,
-        use_entropy_model=args.use_entropy_model,
-        entropy_model_K=args.entropy_model_K,
-        entropy_model_type=args.entropy_model_type,
-        entropy_model_context=args.entropy_model_context,
-        lr_qphi_mult=args.lr_qphi_mult,
-        n_qphi_steps=args.n_qphi_steps,
-        n_warmup_steps=args.n_warmup_steps,
-        loss_comms_mode=args.loss_comms_mode,
-    )
-    trainer = MAPPOTrainer(config, device=device)
-    buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
+        # Trainer.
+        config = MAPPOConfig(
+            z_dim=args.z_dim,
+            hidden_size=args.hidden_size,
+            lr=args.lr,
+            clip_eps=args.clip_eps,
+            entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm,
+            update_epochs=args.update_epochs,
+            num_minibatches=args.num_minibatches,
+            channel=args.channel,
+            delta=args.delta,
+            lambda_comms=args.lambda_comms,
+            ste_clip=args.ste_clip,
+            use_entropy_model=args.use_entropy_model,
+            entropy_model_K=args.entropy_model_K,
+            entropy_model_type=args.entropy_model_type,
+            entropy_model_context=args.entropy_model_context,
+            lr_qphi_mult=args.lr_qphi_mult,
+            n_qphi_steps=args.n_qphi_steps,
+            n_warmup_steps=args.n_warmup_steps,
+            loss_comms_mode=args.loss_comms_mode,
+        )
+        trainer = MAPPOTrainer(config, device=device)
+        buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
 
-    n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
+        n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
 
-    obs = env.reset()
+        obs = env.reset()
 
-    # q_φ warm-start: collect one rollout then run pre-training steps.
-    if args.use_entropy_model and args.n_warmup_steps > 0:
-        buffer.reset()
-        _obs = obs
-        for _ in range(args.n_steps):
+        # q_φ warm-start: collect one rollout then run pre-training steps.
+        if args.use_entropy_model and args.n_warmup_steps > 0:
+            buffer.reset()
+            _obs = obs
+            for _ in range(args.n_steps):
+                _goal_np, _lp_np = _obs
+                _goal = torch.from_numpy(_goal_np).to(device)
+                _lp = torch.from_numpy(_lp_np).to(device)
+                _action, _log_prob, _value = trainer.act_and_value(_goal, _lp)
+                _next_obs, _reward, _done, _info = env.step(_action.cpu().numpy())
+                _reward_shared = _reward[:, 0, 0]
+                _done_shared = _done[:, 0]
+                _goal_ids_np = np.array(
+                    [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in _goal_np],
+                    dtype=np.int64,
+                )
+                buffer.insert(
+                    _goal, _lp, _action, _log_prob, _value,
+                    torch.from_numpy(_reward_shared).to(device),
+                    torch.from_numpy(_done_shared.astype(np.float32)).to(device),
+                    goal_id=torch.from_numpy(_goal_ids_np).to(device),
+                )
+                _obs = _next_obs
+            # Use last obs to compute bootstrap value for the warm-start buffer.
             _goal_np, _lp_np = _obs
             _goal = torch.from_numpy(_goal_np).to(device)
             _lp = torch.from_numpy(_lp_np).to(device)
-            _action, _log_prob, _value = trainer.act_and_value(_goal, _lp)
-            _next_obs, _reward, _done, _info = env.step(_action.cpu().numpy())
-            _reward_shared = _reward[:, 0, 0]
-            _done_shared = _done[:, 0]
-            _goal_ids_np = np.array(
-                [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in _goal_np],
-                dtype=np.int64,
+            _last_value = trainer.get_value(_goal, _lp)
+            buffer.compute_returns_and_advantages(
+                _last_value, trainer.value_norm, args.gamma, args.gae_lambda
             )
-            buffer.insert(
-                _goal, _lp, _action, _log_prob, _value,
-                torch.from_numpy(_reward_shared).to(device),
-                torch.from_numpy(_done_shared.astype(np.float32)).to(device),
-                goal_id=torch.from_numpy(_goal_ids_np).to(device),
-            )
-            _obs = _next_obs
-        # Use last obs to compute bootstrap value for the warm-start buffer.
-        _goal_np, _lp_np = _obs
-        _goal = torch.from_numpy(_goal_np).to(device)
-        _lp = torch.from_numpy(_lp_np).to(device)
-        _last_value = trainer.get_value(_goal, _lp)
-        buffer.compute_returns_and_advantages(
-            _last_value, trainer.value_norm, args.gamma, args.gae_lambda
-        )
-        # Restore obs for the main loop (continue from where warm-start left off).
-        obs = _obs
-        warmup_loss = trainer.warmup_entropy_model(buffer, args.n_warmup_steps)
-        print(f"[warmup] q_φ pre-training done. final_loss={warmup_loss:.4f}")
+            # Restore obs for the main loop (continue from where warm-start left off).
+            obs = _obs
+            warmup_loss = trainer.warmup_entropy_model(buffer, args.n_warmup_steps)
+            print(f"[warmup] q_φ pre-training done. final_loss={warmup_loss:.4f}")
 
-    recent_rewards: deque[float] = deque(maxlen=200)
-    recent_successes: deque[int] = deque(maxlen=200)
+        recent_rewards: deque[float] = deque(maxlen=200)
+        recent_successes: deque[int] = deque(maxlen=200)
 
-    start_time = time.time()
-    for update in range(n_updates):
-        buffer.reset()
+        start_time = time.time()
+        for update in range(n_updates):
+            buffer.reset()
 
-        for _ in range(args.n_steps):
+            for _ in range(args.n_steps):
+                goal_np, lp_np = obs
+                goal = torch.from_numpy(goal_np).to(device)
+                lp = torch.from_numpy(lp_np).to(device)
+
+                action, log_prob, value = trainer.act_and_value(goal, lp)
+
+                next_obs, reward, done, info = env.step(action.cpu().numpy())
+                reward_shared = reward[:, 0, 0]
+                done_shared = done[:, 0]
+
+                # Map goal positions → goal indices for per-goal bit-allocation logging.
+                goal_ids_np = np.array(
+                    [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in goal_np],
+                    dtype=np.int64,
+                )
+
+                buffer.insert(
+                    goal, lp, action, log_prob, value,
+                    torch.from_numpy(reward_shared).to(device),
+                    torch.from_numpy(done_shared.astype(np.float32)).to(device),
+                    goal_id=torch.from_numpy(goal_ids_np).to(device),
+                )
+
+                if done_shared.any():
+                    idx = np.nonzero(done_shared)[0]
+                    recent_rewards.extend(info["final_episode_reward"][idx].tolist())
+                    recent_successes.extend(info["success"][idx].tolist())
+
+                obs = next_obs
+
             goal_np, lp_np = obs
             goal = torch.from_numpy(goal_np).to(device)
             lp = torch.from_numpy(lp_np).to(device)
+            last_value = trainer.get_value(goal, lp)
 
-            action, log_prob, value = trainer.act_and_value(goal, lp)
-
-            next_obs, reward, done, info = env.step(action.cpu().numpy())
-            reward_shared = reward[:, 0, 0]
-            done_shared = done[:, 0]
-
-            # Map goal positions → goal indices for per-goal bit-allocation logging.
-            goal_ids_np = np.array(
-                [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in goal_np],
-                dtype=np.int64,
+            buffer.compute_returns_and_advantages(
+                last_value, trainer.value_norm, args.gamma, args.gae_lambda
             )
 
-            buffer.insert(
-                goal, lp, action, log_prob, value,
-                torch.from_numpy(reward_shared).to(device),
-                torch.from_numpy(done_shared.astype(np.float32)).to(device),
-                goal_id=torch.from_numpy(goal_ids_np).to(device),
-            )
+            metrics = trainer.update(buffer)
 
-            if done_shared.any():
-                idx = np.nonzero(done_shared)[0]
-                recent_rewards.extend(info["final_episode_reward"][idx].tolist())
-                recent_successes.extend(info["success"][idx].tolist())
+            timestep = (update + 1) * args.n_envs * args.n_steps
+            mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+            success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
+            sps = timestep / (time.time() - start_time)
 
-            obs = next_obs
+            per_goal_bits = [
+                metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
+            ]
+            p2_vals = [
+                metrics.get("entropy_rate", float("nan")),
+                metrics.get("H_m_empirical", float("nan")),
+                metrics.get("qphi_gap", float("nan")),
+                metrics.get("tc_bits", float("nan")),
+                metrics.get("qphi_neg_log_max", float("nan")),
+                metrics.get("bits_vs_magnitude", float("nan")),
+            ] + [metrics.get(f"entropy_rate_goal_{i}", float("nan")) for i in range(_N_GOALS)]
+            csv_writer.writerow([
+                update, timestep, mean_reward, success_rate,
+                metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
+                metrics["approx_kl"], metrics["clip_frac"],
+                metrics["comms_loss"], metrics["bits_per_msg"],
+                metrics["mag_bits_per_msg"], metrics["true_bits_per_msg"],
+                metrics["z_norm"], sps,
+            ] + per_goal_bits + p2_vals)
+            csv_file.flush()
 
-        goal_np, lp_np = obs
-        goal = torch.from_numpy(goal_np).to(device)
-        lp = torch.from_numpy(lp_np).to(device)
-        last_value = trainer.get_value(goal, lp)
+            if update % args.log_every == 0 or update == n_updates - 1:
+                print(
+                    f"[{update:4d}/{n_updates}] t={timestep:>8d} "
+                    f"reward={mean_reward:+.3f} success={success_rate:.2f} "
+                    f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
+                    f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
+                    f"clip={metrics['clip_frac']:.2f} "
+                    f"bits={metrics['bits_per_msg']:.2f} "
+                    f"bits_mag={metrics['mag_bits_per_msg']:.2f} "
+                    f"bits_true={metrics['true_bits_per_msg']:.2f} "
+                    f"sps={sps:.0f}"
+                )
 
-        buffer.compute_returns_and_advantages(
-            last_value, trainer.value_norm, args.gamma, args.gae_lambda
-        )
-
-        metrics = trainer.update(buffer)
-
-        timestep = (update + 1) * args.n_envs * args.n_steps
-        mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
-        success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
-        sps = timestep / (time.time() - start_time)
-
-        per_goal_bits = [
-            metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
-        ]
-        p2_vals = [
-            metrics.get("entropy_rate", float("nan")),
-            metrics.get("H_m_empirical", float("nan")),
-            metrics.get("qphi_gap", float("nan")),
-            metrics.get("tc_bits", float("nan")),
-            metrics.get("qphi_neg_log_max", float("nan")),
-            metrics.get("bits_vs_magnitude", float("nan")),
-        ] + [metrics.get(f"entropy_rate_goal_{i}", float("nan")) for i in range(_N_GOALS)]
-        csv_writer.writerow([
-            update, timestep, mean_reward, success_rate,
-            metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
-            metrics["approx_kl"], metrics["clip_frac"],
-            metrics["comms_loss"], metrics["bits_per_msg"],
-            metrics["mag_bits_per_msg"], metrics["true_bits_per_msg"],
-            metrics["z_norm"], sps,
-        ] + per_goal_bits + p2_vals)
-        csv_file.flush()
-
-        if update % args.log_every == 0 or update == n_updates - 1:
-            print(
-                f"[{update:4d}/{n_updates}] t={timestep:>8d} "
-                f"reward={mean_reward:+.3f} success={success_rate:.2f} "
-                f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
-                f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
-                f"clip={metrics['clip_frac']:.2f} "
-                f"bits={metrics['bits_per_msg']:.2f} "
-                f"bits_mag={metrics['mag_bits_per_msg']:.2f} "
-                f"bits_true={metrics['true_bits_per_msg']:.2f} "
-                f"sps={sps:.0f}"
-            )
-
-    csv_file.close()
-
-    ckpt_path = run_dir / "final.pt"
-    torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)
-    print(f"Done. Logs: {run_dir}/  metrics: {csv_path}  ckpt: {ckpt_path}")
+        ckpt_path = run_dir / "final.pt"
+        torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)
+        print(f"Done. Logs: {run_dir}/  metrics: {csv_path}  ckpt: {ckpt_path}")
+    finally:
+        csv_file.close()
 
 
 if __name__ == "__main__":

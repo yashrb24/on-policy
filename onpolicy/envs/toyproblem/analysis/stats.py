@@ -260,11 +260,20 @@ def compare_configs(
         for j, cb in enumerate(configs):
             if j <= i:
                 continue
-            va = summary[summary[group_col] == ca][metric].values
-            vb = summary[summary[group_col] == cb][metric].values
-            # Match by seed if possible; otherwise use minimum length.
-            n = min(len(va), len(vb))
-            p = paired_permutation_test(va[:n], vb[:n], n_perm=n_perm, rng=rng)
+            da = summary[summary[group_col] == ca]
+            db = summary[summary[group_col] == cb]
+            # Pair by seed when the column exists to avoid positional mismatches.
+            if "seed" in summary.columns:
+                shared = sorted(set(da["seed"]) & set(db["seed"]))
+                if not shared:
+                    continue
+                va = da.set_index("seed").loc[shared, metric].values
+                vb = db.set_index("seed").loc[shared, metric].values
+            else:
+                n = min(len(da), len(db))
+                va = da[metric].values[:n]
+                vb = db[metric].values[:n]
+            p = paired_permutation_test(va, vb, n_perm=n_perm, rng=rng)
             rows.append({
                 "config_a": ca,
                 "config_b": cb,
