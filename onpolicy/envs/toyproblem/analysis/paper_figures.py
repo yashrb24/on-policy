@@ -119,11 +119,16 @@ def _sem_ci(std: float, n: int, z: float = 1.96) -> float:
 
 
 def _float32_annotation(ax, bits: float, sr: float) -> None:
-    """Add Float32 as a text box outside the axes instead of a data point."""
+    """Add Float32 as a text box at the top-right of the axes.
+
+    Placed top-right (not bottom-right) so it never overlaps the legend,
+    which is conventionally anchored to the lower-right for rate-distortion
+    plots where the Pareto frontier rises to the upper-left.
+    """
     ax.annotate(
         f"Float32 passthrough\n({bits:.0f} bits, SR={sr:.2f})",
-        xy=(1.0, 0.02), xycoords="axes fraction",
-        ha="right", va="bottom", fontsize=8,
+        xy=(0.99, 0.97), xycoords="axes fraction",
+        ha="right", va="top", fontsize=8,
         color=_CHANNEL_COLORS["none"],
         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_CHANNEL_COLORS["none"],
                   alpha=0.85, lw=0.8),
@@ -219,19 +224,19 @@ def plot_paper_rate_distortion(
                     continue
                 ax.plot(
                     curve[bits_col], curve[sr_col],
-                    color=color, linewidth=0.9, alpha=0.28, zorder=2,
+                    color=color, linewidth=1.1, alpha=0.35, zorder=2,
                 )
                 ax.scatter(
                     curve[bits_col], curve[sr_col],
-                    s=14, color=color,
+                    s=16, color=color,
                     marker=_CHANNEL_MARKERS[ch],
-                    alpha=0.28, zorder=2,
+                    alpha=0.35, zorder=2,
                 )
         elif have_lambda:
             curve = ch_data.sort_values(lambda_col)
             ax.plot(
                 curve[bits_col], curve[sr_col],
-                color=color, linewidth=0.9, alpha=0.28, zorder=2,
+                color=color, linewidth=1.1, alpha=0.35, zorder=2,
             )
 
     # Pareto-optimal configs: full-opacity markers with 95% CI error bars
