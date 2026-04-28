@@ -426,6 +426,145 @@ After all 6 stages, the following facts will be established for the toy problem:
 
 ---
 
+## 13. Fix Ladder — When P2 Fails to Beat the Baseline
+
+This section is the primary reference for diagnosing and recovering from P2 entropy model failures. Read it when any of the following symptoms appear:
+
+- `qphi_gap` is consistently much larger than the DLM floor (`0.27 × z_dim` bits)
+- `shannon_gap` for P2 configs is worse than or equal to the baseline magnitude run
+- `entropy_loss_magnitude / speaker_grad_norm` ratio < 5%
+
+### Diagnosis: P2-A failure autopsy (2026-04-27)
+
+P2-A results showed every entropy config was worse than baseline (baseline shannon_gap=2.48, best P2=2.90). Three root causes were identified:
+
+| Root cause | Evidence | Fix level |
+|-----------|----------|-----------|
+| **q_φ poorly fitted** | `qphi_gap ≈ 2–6 bits` (factored 6.6, joint 2.5) vs DLM floor 0.54 bits. Both A and B models under-fit. Ballé backward gradient based on a wrong model pushes z in the wrong direction, actively corrupting the speaker. | Level 1 |
+| **λ too small** | `entropy_loss_magnitude ≈ 0.0025` vs `speaker_grad_norm ≈ 0.17` = **1.5% ratio**. Even a perfectly-fitted q_φ would barely move the speaker at λ=5e-4. | Level 2 |
+| **Circular gradient attenuation** | Once q_φ converges to p(m), the mode of q_φ is the current distribution's mode. The backward gradient pulls z toward the mode — i.e., toward the current distribution — which has zero compressive effect once the speaker has concentrated on a few bins. | Level 3 |
+
+An additional structural issue exists: the backward loss used `nll_bwd.mean()` (per-element NLL) rather than `nll_bwd.sum(dim=-1).mean()` (joint NLL). This made the effective λ scale inversely with z_dim (CODE-010 fix also applies to the backward loss — now corrected).
+
+### Fix Ladder
+
+Each level addresses exactly one root cause. Apply in order — stop when P2 beats baseline. All levels are implemented and tested as of 2026-04-27.
+
+---
+
+#### Level 1 — Conditional backward gate (fixes poor q_φ fitting)
+
+**Problem:** Ballé backward fires before q_φ is well-fitted. The gradient direction is wrong, corrupting the speaker.
+
+**Fix:** Set `qphi_bwd_gate_threshold` (recommended: 2.0 bits). The backward entropy loss is only added to `total_loss` when the current batch's `qphi_gap ≤ threshold`. When the gate blocks, the speaker receives no entropy gradient (only magnitude/RL).
+
+**Simultaneously fix q_φ training pace:**
+```
+n_warmup_steps = 50000   (was 5000 — far too few for q_φ to see the policy's distribution)
+n_qphi_steps   = 20      (was 3 — q_φ needs more updates per RL step to track moving target)
+lr_qphi_mult   = 30.0    (was 10.0 — faster adaptation when policy drifts)
+```
+
+**CLI flags:** `--qphi_bwd_gate_threshold 2.0 --n_warmup_steps 50000 --n_qphi_steps 20 --lr_qphi_mult 30.0`
+
+**Go/no-go:** After fix B1, check that `qphi_gap < 1.5 bits` in the second half of training. If yes, proceed to Level 2. If still large, increase `n_qphi_steps` further or check that `n_warmup_steps` is large enough for the current `total_timesteps`.
+
+---
+
+#### Level 2 — λ re-sweep (fixes gradient scale mismatch)
+
+**Problem:** At λ=5e-4, entropy contributes ≈1.5% of total speaker gradient. Even a perfect q_φ cannot overcome RL.
+
+**Fix:** Increase λ until `entropy_loss_magnitude / speaker_grad_norm ≥ 10%`. Empirically this requires λ ≈ 1e-2 given the current architecture (speaker_grad_norm ≈ 0.17 and entropy_rate ≈ 3–5 bits at convergence).
+
+**Warning:** Higher λ will reduce SR. The goal is a **better Pareto frontier** — a config that achieves the same SR as baseline with fewer true_bits, or better SR at the same bits. Concretely: check whether any (λ, SR) point on the P2 frontier lies to the left of the baseline frontier in the rate-distortion plot.
+
+**CLI flag:** `--lambda_comms 1e-2` (or sweep `{5e-3, 1e-2, 2e-2, 5e-2}` for frontier)
+
+**Go/no-go:** If P2 with Level 1+2 achieves at least one frontier point Pareto-better than baseline → Level 2 sufficient. If P2 is still on the same or worse frontier → proceed to Level 3.
+
+---
+
+#### Level 3 — EMA prior (fixes circular gradient attenuation)
+
+**Problem:** A well-fitted marginal prior q_φ(m) has its mode at the mode of the current speaker distribution. The gradient `∇_z[-log q_φ(z/δ)]` pulls z toward the mode — i.e., compresses variance. But once the speaker concentrates on 6 codebook vectors, the distribution is already near-delta on those vectors, the gradient becomes flat, and compression stalls.
+
+**Fix:** Use an **exponential moving average (EMA) shadow** of q_φ for the backward loss. The EMA model lags behind the current distribution by `1 / (1 - momentum)` update steps, so the backward gradient always reflects a *slightly past* distribution. This means messages that were expensive `k` steps ago continue to be penalized now — a persistent incentive to restructure the codebook rather than just concentrate around the current mode.
+
+**Recommended setting:** `ema_prior_momentum=0.95` with the default 20 q_φ steps/update gives an effective lag of ~20 RL updates.
+
+**CLI flags:** `--use_ema_prior --ema_prior_momentum 0.95`
+
+**Go/no-go:** Check `bits_vs_magnitude` (entropy bits − magnitude bits) is consistently negative. If P2 bits < baseline bits at the same SR → Level 3 fixed it. If circular problem persists (bits stuck), proceed to Level 4.
+
+---
+
+#### Level 4 — Fixed Laplace prior (architectural fallback for circular problem)
+
+**When to use:** If Levels 1–3 don't produce a strictly better rate-distortion frontier and circular gradient attenuation is suspected even with EMA.
+
+**Theory:** Replace the learned adaptive q_φ with a **fixed parametric prior** `q(m) = Laplace(m; 0, s)` with `s` as a single slowly-trained scalar. Since `q` never adapts to the encoder's output distribution, the backward gradient `∇_z[-log q(z/δ)]` always points away from the Laplace mode (zero). This is:
+- Equivalent to L1 regularization on z in the continuous limit
+- Guaranteed non-circular (prior is independent of current p(m))
+- Less adaptive than DLM but provides a stable, persistent compression incentive
+
+**Not yet implemented.** Implement as `EntropyModelLaplace(z_dim)` in `network.py` with a single learnable log_scale per dimension, updated on the forward loss only (no backward to speaker from scale updates).
+
+---
+
+#### Level 5 — Two-phase training (decoupled convergence guarantee)
+
+**When to use:** Levels 1–3 don't produce improvement, OR when you want the strongest possible theoretical guarantee that entropy compression works without RL interference.
+
+**Theory:** The fundamental tension is that RL reward and entropy compression have different objectives. During joint training, the RL loss dominates early (when SR is low) and prevents the entropy model from finding a good gradient direction. Two-phase training eliminates this:
+
+- **Phase 1** (`_training_phase == 1`): standard RL + magnitude comms loss until SR converges. The entropy model (`q_φ`) is updated in forward-only mode — building an accurate model of p(m) throughout Phase 1 without corrupting the RL policy. Set `loss_comms_mode="magnitude"` in Phase 1.
+- **Phase 2** (`_training_phase == 2`): entropy loss only. RL losses (`pg_loss`, `critic_loss`) are computed for monitoring but not added to `total_loss`. Listener and critic gradients are zeroed before the optimizer step. Only the speaker is updated, driven purely by `λ × E[-log q_φ(z/δ)]`.
+
+Phase 2 asks: *given a policy that achieves SR=1.0, can we compress its codebook from 4.75 bits to ≤ H(G) = 1.81 bits while maintaining SR ≥ 0.99?* This is a well-posed compression problem with no RL interference.
+
+**CLI flags:**
+```bash
+--phase1_sr_threshold 0.995   # switch to Phase 2 when 200-episode rolling SR >= 0.995
+--loss_comms_mode magnitude   # Phase 1 uses magnitude; entropy kicks in Phase 2
+--lambda_comms 1e-2           # Phase 2 entropy loss scale
+--qphi_bwd_gate_threshold 2.0 # still gate backward even in Phase 2
+--n_warmup_steps 50000        # q_φ accumulates data throughout Phase 1
+--n_qphi_steps 20             # q_φ stays well-fitted throughout
+```
+
+**Important:** `total_timesteps` must be large enough for both phases. Phase 1 takes ~300k steps to converge to SR≥0.995. Recommend `total_timesteps=1_000_000` (300k Phase 1 + 700k Phase 2).
+
+**Go/no-go:** Phase 2 should show monotonically decreasing `true_bits_per_msg` while `success_rate` stays ≥ 0.98. If bits decrease but SR drops below 0.95, reduce λ. If bits don't decrease at all, check `bwd_gate_active=1` and `entropy_loss_magnitude/speaker_grad_norm ≥ 5%`.
+
+---
+
+### Experiment configs (P2-FIX stage)
+
+Run via `experiments/run_p2_ablation.py --stage P2-FIX`. 25 runs (5 configs × 5 seeds):
+
+| Config | Levels active | Key flags |
+|--------|--------------|-----------|
+| `fix_baseline` | None (reference) | P2-A defaults: n_warmup=5000, n_qphi=3 |
+| `fix_B1_gate` | L1 | gate=2.0, n_warmup=50000, n_qphi=20 |
+| `fix_B2_gate_lambda` | L1+L2 | gate=2.0, n_warmup=50000, n_qphi=20, λ=1e-2 |
+| `fix_B3_ema` | L1+L2+L3 | gate=2.0, n_warmup=50000, n_qphi=20, λ=1e-2, EMA |
+| `fix_B4_twophase` | L1+L2+L5 | gate=2.0, n_warmup=50000, n_qphi=20, λ=1e-2, phase1_sr=0.995 |
+
+### Metrics to monitor after each fix level
+
+| Metric | Target after fix | Notes |
+|--------|-----------------|-------|
+| `qphi_gap` | ≤ 1.0 bits | Confirms L1 is working. DLM floor = 0.27 × z_dim |
+| `bwd_gate_active` | 1.0 (majority of updates) | Gate should open after warm-start |
+| `entropy_loss_magnitude / speaker_grad_norm` | ≥ 5% | L2 scale check |
+| `bits_vs_magnitude` | < 0 | Entropy bits < magnitude bits = P2 winning |
+| `training_phase` | transitions 1→2 | Phase switch log for L5 |
+| `true_bits_per_msg` (Phase 2) | monotone decreasing | Core compression signal |
+| `shannon_gap` | < baseline (2.48 bits) | The ultimate success criterion |
+
+---
+
 ## 12. Document Update Instructions
 
 **At session start (when working on P2):** Read this file fully. Check §1–§10 before writing any code.

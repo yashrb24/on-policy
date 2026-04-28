@@ -347,6 +347,17 @@ These are upstream bugs in the shared `on-policy` repository. They were found du
 
 ---
 
+### [CODE-012] Ballé backward loss used per-element NLL scale — effective λ halved for z_dim=2
+- **Phase discovered:** Phase 3 (fix-ladder implementation, 2026-04-28)
+- **Date:** 2026-04-28
+- **Symptom:** The effective strength of the entropy backward signal was half what λ implied for z_dim=2, quarter for z_dim=4, etc. The `entropy_loss_magnitude` metric also reported the wrong (halved) value, making the 1.5% gradient ratio look like 3% in truth.
+- **Root cause:** The Ballé backward loss in Step 3 used `nll_bwd.mean()` which averages over ALL `(mb, z_dim)` elements, giving per-element NLL (NLL_joint / z_dim). The `entropy_loss_magnitude` metric had the same bug. The intended quantity is `nll_bwd.sum(dim=-1).mean()` — joint NLL per message — so that λ's interpretation is "bits of gradient pressure per joint message" regardless of z_dim.
+- **Fix:** (2026-04-28) In `trainer.py` Step 3: `nll_bwd.mean()` → `nll_bwd.sum(dim=-1).mean()`. In `entropy_loss_magnitude` metric: `.mean()` → `.sum(dim=-1).mean()`.
+- **Status:** ✅ RESOLVED (2026-04-28)
+- **Reproducibility impact:** LOW — the gradient direction was correct; only the scale changed by factor z_dim. P2-A results (all runs at z_dim=2) had effective λ = 2.5e-4 instead of 5e-4 for the entropy term. This does not change the qualitative conclusion (entropy was too weak), but the numerical comparison across z_dim values in P2-C would have been misleading.
+
+---
+
 ### [CODE-008] Stage A `none` channel redundancy — 45 of 48 runs per z_dim are no-ops
 - **Phase discovered:** Phase 2 (pre-sweep verification, 2026-04-24)
 - **Date:** 2026-04-24

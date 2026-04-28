@@ -39,14 +39,21 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 
 ## Current State
 
-**Phase:** 2 → 3 transition — Stage A sweep complete; baseline frozen; P2-A ablation ready to launch  
-**Running:** Nothing. Stage A sweep complete (2175 / 2175 runs). Data at `runs/toyproblem/sweep_stage_a/` (canonical path).  
-**P2 status:** Implementation complete (47 tests, 0 failures). All 3 hardening fixes applied (mixture prior, scale floor, context B backward disabled). DLM floor CDF fix applied (bin [m,m+1) not [m-0.5,m+0.5)). Prior-based bit cost active when P2 entropy model is on. Device auto-selection (MPS > CUDA > CPU) in train.py.  
-**Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. Success_rate=1.000 ± 0.000 across 5 seeds; true_bits=4.75; interior optimum (delta=1.0 ∈ (0.5,20)); Pareto-optimal (fewest bits at perfect SR).  
-**paper_figures.py:** Fully rewritten (10 publication-quality figures). Fig 1 uses per-channel λ-sweep trade-off curves (one line per δ, sorted by λ) so SD's dominance is visible across the entire search space, not just the best config. H(G) labelled "min. bits for SR=1". AppB annotation repositioned below tick labels.  
-**P2 metrics:** Extended — shannon_gap, bits_to_hg_ratio, warm_start_bits_final, H_dim_k, entropy_rate_B, context_gap_bits, entropy_loss_magnitude, speaker_grad_norm. Companion context-B model auto-runs alongside context-A. CSV header now dynamic via `_build_csv_header(z_dim)`.  
-**P2-A result:** No P2 config beats baseline on shannon_gap (baseline=2.48, best P2=2.90). entropy_rate_B≈0.7 bits confirms m near-deterministic given z. Entropy backward gradient ~1% of speaker gradient at λ=5e-4 — too small. K(1→20) and loss_mode(both vs entropy) have negligible effect.  
-**Immediate next action:** Re-run P2-A sweep after CODE-010/CODE-011 fixes (metrics were wrong). Then decide on P2-B λ re-sweep or redesign.
+**Phase:** 2 → 3 transition — Stage A sweep complete; baseline frozen; P2 fix ladder implemented and tested  
+**Running:** Nothing.  
+**P2 status:** Fix ladder complete (143 tests, 0 failures). CODE-010/011 fixed (qphi_gap units, nll_goal naming). Backward loss scale fixed (sum → joint NLL). Level 1/3/5 implemented. See PILLAR_P2.md §13.  
+**P2-A result (pre-fix):** All P2 configs worse than baseline (baseline shannon_gap=2.48, best P2=2.90). Three root causes: q_φ poorly fitted (qphi_gap 2–6 bits vs floor 0.54), λ too small (entropy 1.5% of speaker gradient), circular gradient attenuation.  
+**Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. SR=1.000±0.000; true_bits=4.75.  
+**Immediate next action:** Run P2-FIX sweep (25 runs × 5 seeds):
+```bash
+nohup bash -c 'KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+    python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \
+    --stage P2-FIX --seeds 0 1 2 3 4 \
+    --log_dir runs/toyproblem/p2_fix \
+    --best_K 5 --best_model_type factored \
+    --phase2_lambda 5e-4 --phase2_delta 1.0 --phase2_z_dim 2' \
+    > /tmp/p2_fix.log 2>&1 &
+```
 
 **Directory layout (canonical, from repo root):**
 - Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
@@ -76,6 +83,9 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 17 (2026-04-28):** Implemented full P2 fix ladder (Levels 1–5). (1) Level 1 — conditional backward gate: `qphi_bwd_gate_threshold` config field + gate check after q_phi Step 1 in trainer.py; backward only fires when qphi_gap ≤ threshold. (2) Level 3 — EMA prior: `use_ema_prior` + `ema_prior_momentum` config fields; `_ema_entropy_model` shadow created at init, updated via `_update_ema_prior()` after each q_phi step; EMA model used for backward loss in place of live q_phi. (3) Level 5 — two-phase training: `phase1_sr_threshold` config field; `notify_success_rate()` method in trainer triggers `_training_phase = 2` on first SR crossing; Phase 2 zero-grads listener/critic/channel before optimizer step. (4) Also fixed backward loss dimensional bug: changed `nll_bwd.mean()` → `nll_bwd.sum(dim=-1).mean()` for consistent λ scale across z_dims; same fix for `entropy_loss_magnitude` metric. (5) Added `training_phase` and `bwd_gate_active` CSV columns. (6) Added P2-FIX stage to `run_p2_ablation.py` (25 runs: 5 configs × 5 seeds). (7) Added §13 "Fix Ladder" to PILLAR_P2.md. (8) 16 new TestFixLadder tests — 143 total, 0 failures.  
+**Immediate next action:** Run P2-FIX sweep to validate the fix ladder empirically.
 
 **Session 16 (2026-04-27):** CODE-010 + CODE-011 fixed. (1) CODE-010: `entropy_rate = nll_log.mean()` was per-element NLL (NLL_joint/z_dim) compared against H_joint — dimensional mismatch producing negative qphi_gap for z_dim>1. Fixed to `nll_log.sum(dim=-1).mean()` (joint NLL per message) in `trainer.py`. Same fix applied to `entropy_rate_B` and `qphi_neg_log_max`. Gibbs was always satisfied at joint level; bug was purely a units error. (2) CODE-011: per-goal column renamed `entropy_rate_goal_*` → `nll_goal_*` in `trainer.py` and `train.py` to accurately reflect it stores model NLL not empirical entropy. (3) Added `test_qphi_gap_gibbs_nonnegative` test covering z_dim ∈ {1,2,3} — now 127 tests, 0 failures. (4) P2-A ablation results (runs/toyproblem/p2_ablation) are invalid under old metrics; need re-run. paper_figures.py redesign complete with per-channel Pareto frontier + top-K tradeoff lines + CI bands + inset zoom.
 

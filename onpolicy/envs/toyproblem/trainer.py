@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -44,6 +45,23 @@ class MAPPOConfig:
     n_warmup_steps: int = 5000             # q_φ warm-start steps before RL
     loss_comms_mode: str = "magnitude"     # "magnitude" | "entropy" | "both"
 
+    # P2 — Fix-ladder options (see docs/pillars/PILLAR_P2.md §13)
+    # Level 1: backward gate — only allow Ballé backward once q_φ is well-fitted.
+    # Default inf disables the gate (backward always active, current behaviour).
+    qphi_bwd_gate_threshold: float = float("inf")
+
+    # Level 3: EMA prior — use an exponential-moving-average shadow of q_φ for the
+    # backward loss.  Breaks the circular gradient problem: the EMA model lags behind
+    # p(m) so the gradient always points toward genuinely cheaper messages.
+    use_ema_prior: bool = False
+    ema_prior_momentum: float = 0.95       # higher = slower EMA (more lag, more stable)
+
+    # Level 5: Two-phase training — jointly train RL + magnitude in Phase 1 until the
+    # policy converges, then switch to entropy-only loss in Phase 2 to compress the
+    # already-learned code without corrupting task performance.
+    # 0.0 = disabled (no phase switching).
+    phase1_sr_threshold: float = 0.0
+
 
 class MAPPOTrainer(nn.Module):
     """Speaker + listener + centralized critic with a single Adam over all params.
@@ -79,8 +97,12 @@ class MAPPOTrainer(nn.Module):
         # value for measurement; see PILLAR_P2.md §10 Stage P2-A).
         self.entropy_model_B = None
         self.optim_qphi_B = None
+        # EMA shadow of entropy model (Level 3 fix — only created when use_ema_prior=True)
+        self._ema_entropy_model = None
         # Warm-start final loss (NaN until warm-start runs)
         self._warmup_bits_final: float = float("nan")
+        # Training phase: 1 = RL + comms (joint), 2 = entropy compression only
+        self._training_phase: int = 1
         if config.use_entropy_model:
             ctx = config.entropy_model_context
             typ = config.entropy_model_type
@@ -113,6 +135,11 @@ class MAPPOTrainer(nn.Module):
                     lr=config.lr * config.lr_qphi_mult,
                     eps=config.adam_eps,
                 )
+                # Level 3: EMA shadow for backward loss (context A only)
+                if config.use_ema_prior and ctx == "A":
+                    self._ema_entropy_model = copy.deepcopy(self.entropy_model).to(device)
+                    for p in self._ema_entropy_model.parameters():
+                        p.requires_grad_(False)
 
         self._trainable = (
             list(self.speaker.parameters())
@@ -143,6 +170,47 @@ class MAPPOTrainer(nn.Module):
     ) -> torch.Tensor:
         state = torch.cat([listener_pos, goal], dim=-1)
         return self.critic(state)
+
+    def notify_success_rate(self, sr: float) -> bool:
+        """Inform the trainer of the current rolling success rate.
+
+        Call from train.py after each update. Returns True exactly once, when
+        the training phase transitions from 1 → 2 (i.e. the first time SR
+        crosses `phase1_sr_threshold`).  After that, Phase 2 stays active for
+        the rest of training.
+
+        Phase 2 semantics (Level 5 fix — two-phase training):
+          - Phase 1: standard RL + magnitude/entropy comms loss.
+          - Phase 2: entropy compression only.  RL losses are computed but not
+            added to total_loss; only the Ballé backward entropy term drives the
+            speaker.  Listener and critic gradients are zeroed before the
+            optimizer step so they do not drift away from their Phase 1 solution.
+        """
+        if (self._training_phase == 1
+                and self.config.phase1_sr_threshold > 0.0
+                and sr >= self.config.phase1_sr_threshold):
+            self._training_phase = 2
+            return True
+        return False
+
+    def _update_ema_prior(self) -> None:
+        """Update EMA shadow of entropy model (Level 3 — call after each q_φ step).
+
+        The EMA model lags behind the live q_φ by one-minus-momentum generations,
+        breaking the circular gradient: the backward loss uses a prior that does
+        not perfectly track the current p(m), so ∇_z[-log q_ema(z/δ)] always
+        points toward genuinely cheaper messages rather than toward the current
+        distribution's mode.
+        """
+        if self._ema_entropy_model is None:
+            return
+        mom = self.config.ema_prior_momentum
+        with torch.no_grad():
+            for p_live, p_ema in zip(
+                self.entropy_model.parameters(),
+                self._ema_entropy_model.parameters(),
+            ):
+                p_ema.data.mul_(mom).add_(p_live.data, alpha=1.0 - mom)
 
     def warmup_entropy_model(self, buffer: RolloutBuffer, n_steps: int) -> float:
         """Pre-train q_φ for n_steps gradient steps before RL begins.
@@ -210,6 +278,7 @@ class MAPPOTrainer(nn.Module):
                 # message distribution, giving a fresher rate signal. Using z_new
                 # from the current minibatch avoids the stale-z problem that arises
                 # when q_φ is updated after the speaker has already been changed.
+                _qphi_gap_now: float | None = None   # used by backward gate in Step 3
                 if self.entropy_model is not None and m is not None:
                     m_float = m.float().detach()
                     for _ in range(self.config.n_qphi_steps):
@@ -221,6 +290,14 @@ class MAPPOTrainer(nn.Module):
                         self.optim_qphi.zero_grad(set_to_none=True)
                         loss_q.backward()
                         self.optim_qphi.step()
+                    # Level 3: update EMA shadow after q_φ gradient steps
+                    self._update_ema_prior()
+                    # Level 1: compute qphi_gap for backward gate check in Step 3
+                    if self.config.qphi_bwd_gate_threshold < float("inf"):
+                        with torch.no_grad():
+                            _nll_check = self.entropy_model.nll_bits(m_float)
+                            _h_check = joint_entropy_bits(m.long())
+                            _qphi_gap_now = _nll_check.sum(dim=-1).mean().item() - _h_check
                     # Companion context-B forward update (measurement only)
                     if self.entropy_model_B is not None:
                         nll_B_fwd = self.entropy_model_B.nll_bits(
@@ -257,10 +334,16 @@ class MAPPOTrainer(nn.Module):
                 comms_per_elem = self.channel.comms_loss(z_new)
                 comms_mean = comms_per_elem.mean()
 
-                total_loss = actor_loss + critic_loss
-                if self.config.lambda_comms > 0.0:
-                    if self.config.loss_comms_mode in ("magnitude", "both"):
-                        total_loss = total_loss + self.config.lambda_comms * comms_mean
+                # Phase 1: RL + magnitude comms.  Phase 2: entropy only (RL terms
+                # are computed above for logging but not added to total_loss).
+                if self._training_phase == 1:
+                    total_loss = actor_loss + critic_loss
+                    if self.config.lambda_comms > 0.0:
+                        if self.config.loss_comms_mode in ("magnitude", "both"):
+                            total_loss = total_loss + self.config.lambda_comms * comms_mean
+                else:
+                    # Phase 2 — entropy-only.  Start with zero; entropy term below.
+                    total_loss = torch.zeros(1, device=self.device)
 
                 # ── Step 3: entropy backward loss — context A ONLY ────────────────
                 # Context B backward is DISABLED: q_φ(m|z) conditions on the very z
@@ -270,21 +353,52 @@ class MAPPOTrainer(nn.Module):
                 # pressure. Context B is valid as a MEASUREMENT tool (forward loss +
                 # metrics) but must never be used for the speaker gradient path.
                 # See docs/pillars/PILLAR_P2.md §4 for the full derivation.
-                if (self.entropy_model is not None and m is not None
-                        and self.config.loss_comms_mode in ("entropy", "both")
-                        and self.config.entropy_model_context == "A"):
-                    z_over_delta = z_new / self.config.delta
-                    # Freeze q_φ: grad flows to z (speaker), not to q_φ params
-                    for p in self.entropy_model.parameters():
-                        p.requires_grad_(False)
-                    nll_bwd = self.entropy_model.nll_bits(z_over_delta)
-                    for p in self.entropy_model.parameters():
-                        p.requires_grad_(True)
-                    total_loss = total_loss + self.config.lambda_comms * nll_bwd.mean()
+                #
+                # Level 1 gate: skip backward if q_φ is poorly fitted.
+                # Level 3 EMA: use shadow model so gradient points away from current mode.
+                # Level 5 Phase 2: entropy backward is the ONLY loss in Phase 2.
+                _bwd_gate_active = False
+                _entropy_bwd_active = (
+                    self.entropy_model is not None and m is not None
+                    and self.config.entropy_model_context == "A"
+                    and (self.config.loss_comms_mode in ("entropy", "both")
+                         or self._training_phase == 2)
+                )
+                if _entropy_bwd_active:
+                    # Level 1: gate — only fire if q_φ is well-fitted (or gate off)
+                    _gate_threshold = self.config.qphi_bwd_gate_threshold
+                    _gate_ok = (
+                        _gate_threshold == float("inf")   # gate disabled
+                        or _qphi_gap_now is None           # could not compute (gate off)
+                        or _qphi_gap_now <= _gate_threshold
+                    )
+                    if _gate_ok:
+                        _bwd_gate_active = True
+                        z_over_delta = z_new / self.config.delta
+                        # Level 3: use EMA shadow if configured; otherwise freeze live q_φ
+                        if self._ema_entropy_model is not None:
+                            # EMA params already have requires_grad=False
+                            nll_bwd = self._ema_entropy_model.nll_bits(z_over_delta)
+                        else:
+                            for p in self.entropy_model.parameters():
+                                p.requires_grad_(False)
+                            nll_bwd = self.entropy_model.nll_bits(z_over_delta)
+                            for p in self.entropy_model.parameters():
+                                p.requires_grad_(True)
+                        # Use joint NLL (sum over dims) so λ scale is dim-independent
+                        total_loss = total_loss + self.config.lambda_comms * nll_bwd.sum(dim=-1).mean()
 
-                # ── Step 4: RL optimizer step ──────────────────────────────────────
+                # ── Step 4: optimizer step ────────────────────────────────────────
                 self.optim.zero_grad(set_to_none=True)
                 total_loss.backward()
+                # Phase 2: zero gradients for listener/critic/channel so only the
+                # speaker is updated by the entropy loss.
+                if self._training_phase == 2:
+                    for p in (list(self.listener.parameters())
+                              + list(self.critic.parameters())
+                              + list(self.channel.parameters())):
+                        if p.grad is not None:
+                            p.grad.zero_()
                 # Capture speaker gradient norm BEFORE clipping (raw signal strength)
                 speaker_grad_norm = float(sum(
                     p.grad.detach().norm().item() ** 2
@@ -294,6 +408,8 @@ class MAPPOTrainer(nn.Module):
                 nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                 self.optim.step()
                 metrics["speaker_grad_norm"].append(speaker_grad_norm)
+                metrics["training_phase"].append(float(self._training_phase))
+                metrics["bwd_gate_active"].append(float(_bwd_gate_active))
 
                 # ── Metrics (no_grad) ──────────────────────────────────────────────
                 with torch.no_grad():
@@ -387,13 +503,14 @@ class MAPPOTrainer(nn.Module):
                             )
 
                         # Entropy backward loss magnitude (how strongly P2 nudges speaker)
-                        if (self.config.loss_comms_mode in ("entropy", "both")
-                                and self.config.entropy_model_context == "A"):
+                        if (self.config.entropy_model_context == "A"
+                                and (self.config.loss_comms_mode in ("entropy", "both")
+                                     or self._training_phase == 2)):
                             ent_loss_mag = (
                                 self.config.lambda_comms
                                 * self.entropy_model.nll_bits(
                                     z_new.detach() / self.config.delta
-                                ).mean()
+                                ).sum(dim=-1).mean()  # joint NLL — matches backward loss
                             ).item()
                             metrics["entropy_loss_magnitude"].append(ent_loss_mag)
 

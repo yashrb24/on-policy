@@ -1,6 +1,9 @@
-"""P2 systematic ablation study — 6 staged experiments, ~345 total runs.
+"""P2 systematic ablation study — 7 staged experiments.
 
-Stage ordering (each stage requires winners from prior stages):
+Stage ordering:
+  P2-FIX Fix ladder        (25 runs) — must run FIRST after P2-A failure diagnosis.
+                                       Tests Levels 1–5 of the fix ladder in isolation.
+                                       See docs/pillars/PILLAR_P2.md §13. Run before P2-B.
   P2-A  Model selection   (115 runs) — K × model_type × loss_comms_mode for context A (trainable);
                                        context B measurement-only runs alongside (K=5, no speaker grad)
   P2-B  λ re-sweep         (35 runs) — P2 rate-distortion frontier; find optimal λ
@@ -226,6 +229,70 @@ def _stage_f(args) -> Iterator[tuple[str, dict]]:
                                    "n_warmup_steps": str(ws)}
 
 
+def _stage_fix(args) -> Iterator[tuple[str, dict]]:
+    """Fix-ladder for P2 gradient failures (25 runs = 5 configs × 5 seeds).
+
+    Motivated by P2-A findings: q_φ poorly fitted (qphi_gap >> 0.54 bits DLM floor),
+    entropy backward gradient only 1.5% of speaker gradient, and circular gradient
+    attenuation once q_φ converges. Five configs target each fix level in order.
+
+    Run order: B1 → B2 → B3 → B4 always.  B5 (two-phase) can run in parallel.
+
+    Config map (see PILLAR_P2.md §13 for theory):
+      fix_baseline   : current P2-A defaults for reference comparison
+      fix_B1         : Level 1 — conditional backward gate (qphi_bwd_gate_threshold=2.0)
+                       + better q_φ training (n_warmup=50000, n_qphi_steps=20)
+      fix_B2         : Level 2 — same as B1 but λ=1e-2 (scale fix)
+      fix_B3         : Level 3 — same as B2 + EMA prior (ema_prior_momentum=0.95)
+      fix_B4         : Level 5 — two-phase training (phase1_sr_threshold=0.995,
+                       λ=1e-2, n_warmup=50000, n_qphi_steps=20, gate enabled)
+    """
+    base = {
+        **_SHARED,
+        "delta": args.phase2_delta,
+        "z_dim": args.phase2_z_dim,
+        "use_entropy_model": "",
+        "entropy_model_K": str(args.best_K),
+        "entropy_model_type": args.best_model_type,
+        "entropy_model_context": "A",
+        "loss_comms_mode": "entropy",
+    }
+    # Reference config: P2-A defaults (no fixes applied)
+    yield "fix_baseline", {**base,
+                            "lambda_comms": args.phase2_lambda,
+                            "n_warmup_steps": "5000",
+                            "n_qphi_steps": "3",
+                            "lr_qphi_mult": "10.0"}
+
+    # Better q_φ training params shared across B1–B4
+    _better_qphi = {"n_warmup_steps": "50000", "n_qphi_steps": "20", "lr_qphi_mult": "30.0"}
+
+    # B1: Level 1 — backward gate + better q_φ training, λ unchanged
+    yield "fix_B1_gate", {**base, **_better_qphi,
+                           "lambda_comms": args.phase2_lambda,
+                           "qphi_bwd_gate_threshold": "2.0"}
+
+    # B2: Level 1+2 — gate + better q_φ + higher λ
+    yield "fix_B2_gate_lambda", {**base, **_better_qphi,
+                                  "lambda_comms": "1e-2",
+                                  "qphi_bwd_gate_threshold": "2.0"}
+
+    # B3: Level 1+2+3 — gate + better q_φ + higher λ + EMA prior
+    yield "fix_B3_ema", {**base, **_better_qphi,
+                          "lambda_comms": "1e-2",
+                          "qphi_bwd_gate_threshold": "2.0",
+                          "use_ema_prior": "",
+                          "ema_prior_momentum": "0.95"}
+
+    # B4: Level 1+2+5 — gate + better q_φ + higher λ + two-phase training
+    # Phase 1: RL + magnitude until SR >= 0.995, then Phase 2: entropy only
+    yield "fix_B4_twophase", {**base, **_better_qphi,
+                               "lambda_comms": "1e-2",
+                               "qphi_bwd_gate_threshold": "2.0",
+                               "loss_comms_mode": "magnitude",  # Phase 1 uses magnitude
+                               "phase1_sr_threshold": "0.995"}
+
+
 _STAGE_FNS = {
     "P2-A": _stage_a,
     "P2-B": _stage_b,
@@ -233,6 +300,7 @@ _STAGE_FNS = {
     "P2-D": _stage_d,
     "P2-E": _stage_e,
     "P2-F": _stage_f,
+    "P2-FIX": _stage_fix,
 }
 
 

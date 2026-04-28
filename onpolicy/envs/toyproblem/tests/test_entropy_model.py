@@ -898,3 +898,238 @@ class TestHardeningFixes:
             "Context B: entropy backward is degenerate and must be disabled, but "
             "speaker params changed. See PILLAR_P2.md §4 for the derivation."
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix-ladder tests (PILLAR_P2.md §13)
+# ---------------------------------------------------------------------------
+
+class TestFixLadder:
+    """Tests for Level 1 (gate), Level 3 (EMA prior), Level 5 (two-phase).
+
+    Each test is self-contained — small buffers, single epoch, minimal config.
+    """
+
+    def _base_cfg(self, **overrides) -> MAPPOConfig:
+        defaults = dict(
+            z_dim=2, channel="sd", delta=1.0, lambda_comms=1e-2,
+            use_entropy_model=True, entropy_model_K=3,
+            entropy_model_type="factored", entropy_model_context="A",
+            lr_qphi_mult=5.0, n_qphi_steps=2,
+            loss_comms_mode="entropy",
+            update_epochs=1, num_minibatches=1,
+        )
+        defaults.update(overrides)
+        return MAPPOConfig(**defaults)
+
+    def _buf(self) -> RolloutBuffer:
+        buf = _make_buffer(z_dim=2, n_steps=8, n_envs=4)
+        buf.advantages = torch.randn(8, 4)
+        buf.returns = torch.ones(8, 4)
+        return buf
+
+    # ── Level 1: Backward gate ─────────���──────────────────────────────────
+
+    def test_gate_disabled_by_default(self):
+        """With threshold=inf (default), bwd_gate_active must always be 1."""
+        t = MAPPOTrainer(self._base_cfg(), device=torch.device("cpu"))
+        metrics = t.update(self._buf())
+        assert metrics.get("bwd_gate_active", 0.0) == 1.0, (
+            "Gate should be active (1.0) when qphi_bwd_gate_threshold=inf"
+        )
+
+    def test_gate_blocks_when_threshold_zero(self):
+        """With threshold=0, gate blocks immediately (qphi_gap is always > 0)."""
+        t = MAPPOTrainer(
+            self._base_cfg(qphi_bwd_gate_threshold=0.0),
+            device=torch.device("cpu"),
+        )
+        metrics = t.update(self._buf())
+        assert metrics.get("bwd_gate_active", 1.0) == 0.0, (
+            "Gate should block (0.0) when threshold=0 since qphi_gap > 0 always"
+        )
+
+    def test_gate_permits_when_threshold_large(self):
+        """With threshold=1000 (very permissive), gate always passes."""
+        t = MAPPOTrainer(
+            self._base_cfg(qphi_bwd_gate_threshold=1000.0),
+            device=torch.device("cpu"),
+        )
+        metrics = t.update(self._buf())
+        assert metrics.get("bwd_gate_active", 0.0) == 1.0
+
+    def test_gate_blocks_speaker_update(self):
+        """When gate blocks, speaker params must not change from entropy loss."""
+        t_gated = MAPPOTrainer(
+            self._base_cfg(qphi_bwd_gate_threshold=0.0),
+            device=torch.device("cpu"),
+        )
+        t_free = MAPPOTrainer(self._base_cfg(), device=torch.device("cpu"))
+        # Use same weights via same seed
+        torch.manual_seed(7)
+        buf = self._buf()
+        buf.advantages = torch.zeros(8, 4)  # zero RL so only entropy drives speaker
+        buf.returns = torch.zeros(8, 4)
+
+        w_before = t_gated.speaker.network[-1].weight.detach().clone()
+        t_gated.update(buf)
+        w_after = t_gated.speaker.network[-1].weight.detach()
+        # Gated trainer: speaker should be unchanged (entropy backward blocked, RL zero)
+        assert torch.allclose(w_before, w_after, atol=1e-6), (
+            "Gate blocked but speaker still updated — backward leak?"
+        )
+
+    # ── Level 3: EMA prior ─────────────────���──────────────────────────────
+
+    def test_ema_model_created_when_enabled(self):
+        """use_ema_prior=True must create _ema_entropy_model."""
+        t = MAPPOTrainer(
+            self._base_cfg(use_ema_prior=True),
+            device=torch.device("cpu"),
+        )
+        assert t._ema_entropy_model is not None, "_ema_entropy_model not created"
+
+    def test_ema_model_not_created_when_disabled(self):
+        """use_ema_prior=False (default) must leave _ema_entropy_model as None."""
+        t = MAPPOTrainer(self._base_cfg(), device=torch.device("cpu"))
+        assert t._ema_entropy_model is None
+
+    def test_ema_params_frozen(self):
+        """EMA model params must have requires_grad=False (no direct optimizer)."""
+        t = MAPPOTrainer(
+            self._base_cfg(use_ema_prior=True),
+            device=torch.device("cpu"),
+        )
+        for p in t._ema_entropy_model.parameters():
+            assert not p.requires_grad, "EMA param should be frozen"
+
+    def test_ema_update_interpolates(self):
+        """After one q_φ update, EMA params should lie between initial and live."""
+        torch.manual_seed(99)
+        t = MAPPOTrainer(
+            self._base_cfg(use_ema_prior=True, ema_prior_momentum=0.9),
+            device=torch.device("cpu"),
+        )
+        # Capture initial EMA params (== live params at init)
+        p_ema_init = [p.data.clone() for p in t._ema_entropy_model.parameters()]
+        p_live_init = [p.data.clone() for p in t.entropy_model.parameters()]
+
+        t.update(self._buf())
+
+        p_ema_after = [p.data for p in t._ema_entropy_model.parameters()]
+        p_live_after = [p.data for p in t.entropy_model.parameters()]
+
+        # EMA must have moved but must not equal live model
+        for ema_i, live_i, ema_a, live_a in zip(
+            p_ema_init, p_live_init, p_ema_after, p_live_after
+        ):
+            # EMA != initial (it moved)
+            assert not torch.allclose(ema_i, ema_a), "EMA did not update"
+            # EMA != live (it lags behind)
+            assert not torch.allclose(ema_a, live_a, atol=1e-6), (
+                "EMA equals live model — no lag applied"
+            )
+
+    def test_ema_backward_does_not_change_qphi_params(self):
+        """Backward through EMA model must not change live q_φ params."""
+        t = MAPPOTrainer(
+            self._base_cfg(use_ema_prior=True),
+            device=torch.device("cpu"),
+        )
+        buf = self._buf()
+        buf.advantages = torch.zeros(8, 4)
+        buf.returns = torch.zeros(8, 4)
+
+        p_qphi_before = [p.data.clone() for p in t.entropy_model.parameters()]
+        t.update(buf)
+        # q_φ is updated by the forward loss in Step 1 (separate optimizer),
+        # NOT by the backward loss through the EMA model. But the forward loss
+        # (Step 1) DOES change q_φ. This test checks that:
+        # - _ema_entropy_model params are not accidentally in optim_qphi's param groups
+        for pg in t.optim_qphi.param_groups:
+            for p in pg["params"]:
+                for ema_p in t._ema_entropy_model.parameters():
+                    assert p.data_ptr() != ema_p.data_ptr(), (
+                        "EMA model params are in optim_qphi — they should be frozen"
+                    )
+
+    # ── Level 5: Two-phase training ───────────────────────────��───────────
+
+    def test_notify_sr_no_phase_change_below_threshold(self):
+        """notify_success_rate below threshold should return False, stay Phase 1."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.9),
+            device=torch.device("cpu"),
+        )
+        assert t._training_phase == 1
+        changed = t.notify_success_rate(0.5)
+        assert not changed
+        assert t._training_phase == 1
+
+    def test_notify_sr_phase_transition_at_threshold(self):
+        """notify_success_rate >= threshold triggers exactly-once Phase 1→2 switch."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.9),
+            device=torch.device("cpu"),
+        )
+        changed = t.notify_success_rate(0.95)
+        assert changed, "First crossing should return True"
+        assert t._training_phase == 2
+
+    def test_notify_sr_no_duplicate_transition(self):
+        """Phase 2 once entered — subsequent notify_success_rate returns False."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.9),
+            device=torch.device("cpu"),
+        )
+        t.notify_success_rate(0.95)   # Phase 1 → 2
+        changed = t.notify_success_rate(0.99)  # already Phase 2 — no-op
+        assert not changed
+        assert t._training_phase == 2
+
+    def test_phase_disabled_when_threshold_zero(self):
+        """phase1_sr_threshold=0 disables phase switching entirely."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.0),
+            device=torch.device("cpu"),
+        )
+        t.notify_success_rate(1.0)   # should not switch
+        assert t._training_phase == 1
+
+    def test_training_phase_in_metrics(self):
+        """training_phase column must be present and equal to current phase."""
+        t = MAPPOTrainer(self._base_cfg(), device=torch.device("cpu"))
+        metrics = t.update(self._buf())
+        assert "training_phase" in metrics
+        assert metrics["training_phase"] == 1.0
+
+    def test_phase2_metrics_show_phase2(self):
+        """After phase switch, training_phase metric must be 2.0."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.5),
+            device=torch.device("cpu"),
+        )
+        t.notify_success_rate(1.0)   # trigger Phase 2
+        metrics = t.update(self._buf())
+        assert metrics.get("training_phase") == 2.0
+
+    def test_phase2_zeros_non_speaker_grads(self):
+        """In Phase 2 only the speaker should be updated; listener/critic/channel frozen."""
+        t = MAPPOTrainer(
+            self._base_cfg(phase1_sr_threshold=0.0001),  # switch immediately
+            device=torch.device("cpu"),
+        )
+        t.notify_success_rate(1.0)   # Phase 2 now active
+
+        w_listener_before = t.listener.logits.weight.data.clone()
+        w_critic_before = t.critic.network[-1].weight.data.clone()
+        t.update(self._buf())
+        w_listener_after = t.listener.logits.weight.data
+        w_critic_after = t.critic.network[-1].weight.data
+
+        assert torch.allclose(w_listener_before, w_listener_after, atol=1e-6), (
+            "Listener should not update in Phase 2"
+        )
+        assert torch.allclose(w_critic_before, w_critic_after, atol=1e-6), (
+            "Critic should not update in Phase 2"
+        )

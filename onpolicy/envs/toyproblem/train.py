@@ -153,6 +153,18 @@ def parse_args() -> argparse.Namespace:
                    help="magnitude: baseline Jensen surrogate. "
                         "entropy: P2 DLM rate. both: sum of both.")
 
+    # P2 fix-ladder options (see PILLAR_P2.md §13)
+    p.add_argument("--qphi_bwd_gate_threshold", type=float, default=float("inf"),
+                   help="Level 1 fix: only fire Ballé backward when qphi_gap <= threshold. "
+                        "Default inf = disabled (always fire).")
+    p.add_argument("--use_ema_prior", action="store_true",
+                   help="Level 3 fix: use EMA shadow of q_φ for backward loss.")
+    p.add_argument("--ema_prior_momentum", type=float, default=0.95,
+                   help="Level 3: EMA momentum (higher = slower shadow update).")
+    p.add_argument("--phase1_sr_threshold", type=float, default=0.0,
+                   help="Level 5 fix: switch to entropy-only Phase 2 when rolling SR "
+                        "reaches this threshold. 0.0 = disabled.")
+
     # Logging
     p.add_argument("--log_dir", type=str, default="runs",
                    help="Root log directory. Actual path: <log_dir>/<exp_name>/<seed>/")
@@ -211,6 +223,7 @@ def _build_csv_header(z_dim: int) -> list[str]:
         "entropy_rate_B", "context_gap_bits",
         "entropy_loss_magnitude", "speaker_grad_norm",
         "warm_start_bits_final",
+        "training_phase", "bwd_gate_active",
     ]
     p2_per_dim = [f"H_dim_{k}" for k in range(z_dim)]
     p2_per_goal = [f"nll_goal_{i}" for i in range(_N_GOALS)]
@@ -262,6 +275,10 @@ def main() -> None:
             n_qphi_steps=args.n_qphi_steps,
             n_warmup_steps=args.n_warmup_steps,
             loss_comms_mode=args.loss_comms_mode,
+            qphi_bwd_gate_threshold=args.qphi_bwd_gate_threshold,
+            use_ema_prior=args.use_ema_prior,
+            ema_prior_momentum=args.ema_prior_momentum,
+            phase1_sr_threshold=args.phase1_sr_threshold,
         )
         trainer = MAPPOTrainer(config, device=device)
         buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
@@ -355,6 +372,11 @@ def main() -> None:
 
             metrics = trainer.update(buffer)
 
+            # Level 5: notify trainer of current SR so it can switch phases.
+            if trainer.notify_success_rate(success_rate):
+                print(f"[phase] SR={success_rate:.3f} >= {args.phase1_sr_threshold:.3f} "
+                      f"at update {update} — switching to Phase 2 (entropy compression only)")
+
             timestep = (update + 1) * args.n_envs * args.n_steps
             mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
             success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
@@ -375,6 +397,8 @@ def main() -> None:
                 metrics.get("entropy_loss_magnitude", float("nan")),
                 metrics.get("speaker_grad_norm", float("nan")),
                 metrics.get("warm_start_bits_final", float("nan")),
+                metrics.get("training_phase", float("nan")),
+                metrics.get("bwd_gate_active", float("nan")),
             ]
             p2_dim_vals = [
                 metrics.get(f"H_dim_{k}", float("nan")) for k in range(args.z_dim)
