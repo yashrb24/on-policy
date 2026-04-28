@@ -372,14 +372,14 @@ def main() -> None:
 
             metrics = trainer.update(buffer)
 
+            timestep = (update + 1) * args.n_envs * args.n_steps
+            mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+            success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
+
             # Level 5: notify trainer of current SR so it can switch phases.
             if trainer.notify_success_rate(success_rate):
                 print(f"[phase] SR={success_rate:.3f} >= {args.phase1_sr_threshold:.3f} "
                       f"at update {update} — switching to Phase 2 (entropy compression only)")
-
-            timestep = (update + 1) * args.n_envs * args.n_steps
-            mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
-            success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
             sps = timestep / (time.time() - start_time)
 
             per_goal_bits = [
