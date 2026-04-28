@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entropy_coef", type=float, default=0.03)
     p.add_argument("--max_grad_norm", type=float, default=0.5)
     p.add_argument("--z_dim", type=int, default=3)
-    p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd"])
+    p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd", "async_sd"])
     p.add_argument("--delta", type=float, default=1.0)
     p.add_argument("--delta_learnable", action="store_true")
     p.add_argument("--delta_global_learnable", action="store_true")

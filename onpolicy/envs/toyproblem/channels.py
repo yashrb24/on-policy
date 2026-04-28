@@ -148,6 +148,66 @@ class DDCL_NSD(nn.Module):
         return torch.log2(z.abs() / self.delta + 1)
 
 
+class DDCL_Async_SD(nn.Module):
+    """
+    Modified version of DDCL_SD where instead of subtracting the same noise at receiver's end, 
+    we subtract a new noise term that is randomly sampled from the same distribution. This breaks
+    our theoretical guarantees, but allows the receiver to work independent of the receiver. 
+    That's why "async". 
+    """
+
+    def __init__(
+        self,
+        delta: float = 1.0,
+        delta_learnable: bool = False,
+        delta_global_learnable: bool = False,
+        zdim: int = 1,
+    ) -> None:
+        super().__init__()
+        self._delta_learnable = delta_learnable
+        self._delta_global_learnable = delta_global_learnable
+        if delta_learnable:
+            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
+            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+        elif delta_global_learnable:
+            self.raw_delta = nn.Parameter(torch.zeros(1))
+        else:
+            self._delta = delta
+
+    @property
+    def delta(self) -> torch.Tensor | float:
+        if self._delta_learnable or self._delta_global_learnable:
+            return F.softplus(self.raw_delta)
+        return self._delta
+
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
+        
+        d = self.delta
+
+        eps1 = (torch.rand_like(z) - 0.5) * d
+        z_prime = z + eps1
+        m = torch.floor(z_prime / d)
+        C_m = (m + 0.5) * d
+        eps2 = (torch.rand_like(z) - 0.5) * d
+        z_hat_deploy = C_m - eps2
+        z_hat = z + (z_hat_deploy - z).detach()
+
+        info = {
+            "m": m,
+            "C_m": C_m,
+            "z_prime": z_prime,
+            "z_hat_deploy": z_hat_deploy,
+            "eps1": eps1,
+            "eps2": eps2,
+        }
+
+        return z_hat, info
+
+    def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
+        """Per-element Jensen upper bound on expected bit length."""
+        return torch.log2(z.abs() / self.delta + 1)
+
+
 def build_channel(
     name: str,
     delta: float,
@@ -155,7 +215,7 @@ def build_channel(
     delta_global_learnable: bool = False,
     zdim: int = 1,
 ) -> nn.Module:
-    table = {"none": IdentityChannel, "sd": DDCL_SD, "nsd": DDCL_NSD}
+    table = {"none": IdentityChannel, "sd": DDCL_SD, "nsd": DDCL_NSD, "async_sd": DDCL_Async_SD}
     if name not in table:
         raise ValueError(f"Unknown channel {name!r}; expected one of {list(table)}")
     return table[name](
