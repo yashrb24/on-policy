@@ -45,7 +45,8 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 **Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. Success_rate=1.000 ± 0.000 across 5 seeds; true_bits=4.75; interior optimum (delta=1.0 ∈ (0.5,20)); Pareto-optimal (fewest bits at perfect SR).  
 **paper_figures.py:** Fully rewritten (10 publication-quality figures). Fig 1 uses per-channel λ-sweep trade-off curves (one line per δ, sorted by λ) so SD's dominance is visible across the entire search space, not just the best config. H(G) labelled "min. bits for SR=1". AppB annotation repositioned below tick labels.  
 **P2 metrics:** Extended — shannon_gap, bits_to_hg_ratio, warm_start_bits_final, H_dim_k, entropy_rate_B, context_gap_bits, entropy_loss_magnitude, speaker_grad_norm. Companion context-B model auto-runs alongside context-A. CSV header now dynamic via `_build_csv_header(z_dim)`.  
-**Immediate next action:** P2-A ablation sweep now RUNNING — `nohup run_p2_ablation.py --stage P2-A` (115 runs).
+**P2-A result:** No P2 config beats baseline on shannon_gap (baseline=2.48, best P2=2.90). entropy_rate_B≈0.7 bits confirms m near-deterministic given z. Entropy backward gradient ~1% of speaker gradient at λ=5e-4 — too small. K(1→20) and loss_mode(both vs entropy) have negligible effect.  
+**Immediate next action:** Re-run P2-A sweep after CODE-010/CODE-011 fixes (metrics were wrong). Then decide on P2-B λ re-sweep or redesign.
 
 **Directory layout (canonical, from repo root):**
 - Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
@@ -75,6 +76,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 16 (2026-04-27):** CODE-010 + CODE-011 fixed. (1) CODE-010: `entropy_rate = nll_log.mean()` was per-element NLL (NLL_joint/z_dim) compared against H_joint — dimensional mismatch producing negative qphi_gap for z_dim>1. Fixed to `nll_log.sum(dim=-1).mean()` (joint NLL per message) in `trainer.py`. Same fix applied to `entropy_rate_B` and `qphi_neg_log_max`. Gibbs was always satisfied at joint level; bug was purely a units error. (2) CODE-011: per-goal column renamed `entropy_rate_goal_*` → `nll_goal_*` in `trainer.py` and `train.py` to accurately reflect it stores model NLL not empirical entropy. (3) Added `test_qphi_gap_gibbs_nonnegative` test covering z_dim ∈ {1,2,3} — now 127 tests, 0 failures. (4) P2-A ablation results (runs/toyproblem/p2_ablation) are invalid under old metrics; need re-run. paper_figures.py redesign complete with per-channel Pareto frontier + top-K tradeoff lines + CI bands + inset zoom.
 
 **Session 15 (2026-04-27):** P2 metrics expansion and fig1 redesign. (1) fig1 rate-distortion: replaced background dots with per-channel λ-sweep trade-off curves (one line per δ, sorted by λ), Float32 annotation moved to top-right to avoid legend overlap, alpha 0.35. (2) New metrics in trainer.py: shannon_gap, bits_to_hg_ratio, warm_start_bits_final, H_dim_k (per-dimension empirical entropy), entropy_rate_B + context_gap_bits (companion context-B oracle), entropy_loss_magnitude, speaker_grad_norm. Added marginal_entropies_bits() to network.py. (3) Companion context-B model auto-created alongside context-A primary for oracle bound measurement in every run. (4) CSV header moved to _build_csv_header(z_dim) inside main() for dynamic H_dim_k columns. (5) Five new P2 analysis figures: p2_shannon_gap, p2_qphi_gap, p2_context_bounds, p2_per_dim_entropy, p2_gradient_balance. (6) PILLAR_P2.md §7 updated with full metrics table. 126 tests passing. P2-A sweep launching.
 

@@ -213,7 +213,7 @@ def _build_csv_header(z_dim: int) -> list[str]:
         "warm_start_bits_final",
     ]
     p2_per_dim = [f"H_dim_{k}" for k in range(z_dim)]
-    p2_per_goal = [f"entropy_rate_goal_{i}" for i in range(_N_GOALS)]
+    p2_per_goal = [f"nll_goal_{i}" for i in range(_N_GOALS)]
     return base + per_goal_bits + p2_base + p2_per_dim + p2_per_goal
 
 
@@ -380,7 +380,7 @@ def main() -> None:
                 metrics.get(f"H_dim_{k}", float("nan")) for k in range(args.z_dim)
             ]
             p2_goal_vals = [
-                metrics.get(f"entropy_rate_goal_{i}", float("nan"))
+                metrics.get(f"nll_goal_{i}", float("nan"))
                 for i in range(_N_GOALS)
             ]
             csv_writer.writerow([

@@ -290,6 +290,34 @@ class TestTrainerEntropyLoss:
         metrics = t.update(buf)
         assert "qphi_gap" in metrics
 
+    def test_qphi_gap_gibbs_nonnegative(self):
+        """Gibbs inequality: NLL_joint(q_phi; p) >= H_joint(p) always.
+
+        Bug fix: entropy_rate was nll_log.mean() (per-element NLL = NLL_joint/z_dim)
+        compared to H_joint — dimensional mismatch causing negative qphi_gap for
+        z_dim > 1.  Fix: entropy_rate = nll_log.sum(dim=-1).mean() (joint NLL).
+        """
+        torch.manual_seed(42)
+        for z_dim in (1, 2, 3):
+            cfg = MAPPOConfig(
+                z_dim=z_dim, channel="sd", delta=1.0, lambda_comms=1e-3,
+                use_entropy_model=True, entropy_model_K=3,
+                entropy_model_type="factored", entropy_model_context="A",
+                lr_qphi_mult=5.0, n_qphi_steps=2,
+                loss_comms_mode="entropy",
+                update_epochs=1, num_minibatches=1,
+            )
+            t = MAPPOTrainer(cfg, device=torch.device("cpu"))
+            buf = _make_buffer(z_dim=z_dim)
+            buf.advantages = torch.randn(4, 4)
+            buf.returns = torch.ones(4, 4)
+            metrics = t.update(buf)
+            gap = metrics.get("qphi_gap", float("-inf"))
+            assert gap >= -0.05, (
+                f"Gibbs violation: qphi_gap={gap:.4f} for z_dim={z_dim} "
+                "(NLL_joint must be >= H_joint)"
+            )
+
     def test_entropy_mode_changes_loss(self):
         """With mode='entropy', entropy_rate must be logged and non-zero."""
         t = self._make_trainer_with_em(mode="entropy")

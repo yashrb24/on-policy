@@ -356,11 +356,11 @@ class MAPPOTrainer(nn.Module):
                 # Remaining P2 metrics (nll_log already computed above)
                 if nll_log is not None:
                     with torch.no_grad():
-                        entropy_rate = nll_log.mean().item()          # per-element mean
-                        qphi_neg_log_max = nll_log.max().item()
+                        entropy_rate = nll_log.sum(dim=-1).mean().item()  # joint NLL per msg
+                        qphi_neg_log_max = nll_log.sum(dim=-1).max().item()
                         h_emp = joint_entropy_bits(m.long())
                         tc = total_correlation_bits(m.long())
-                        qphi_gap = entropy_rate - h_emp
+                        qphi_gap = entropy_rate - h_emp  # NLL_joint - H_joint ≥ 0
                         bits_vs_mag = mag_bits_per_msg - bits_per_msg
 
                         metrics["entropy_rate"].append(entropy_rate)
@@ -380,7 +380,7 @@ class MAPPOTrainer(nn.Module):
                             nll_B = self.entropy_model_B.nll_bits(
                                 m.float().detach(), z_new.detach()
                             )
-                            entropy_rate_B = nll_B.mean().item()
+                            entropy_rate_B = nll_B.sum(dim=-1).mean().item()  # joint NLL per msg
                             metrics["entropy_rate_B"].append(entropy_rate_B)
                             metrics["context_gap_bits"].append(
                                 entropy_rate - entropy_rate_B
@@ -397,11 +397,11 @@ class MAPPOTrainer(nn.Module):
                             ).item()
                             metrics["entropy_loss_magnitude"].append(ent_loss_mag)
 
-                        # Per-goal entropy rate (prior-based, same as bits_goal_<g>)
-                        nll_per_msg = nll_log.sum(dim=-1)  # (mb,)
+                        # Per-goal model NLL (joint NLL per message, grouped by goal)
+                        nll_per_msg = nll_log.sum(dim=-1)  # (mb,) — joint NLL per msg
                         for g_idx in mb["goal_ids"].unique():
                             mask = mb["goal_ids"] == g_idx
-                            key = f"entropy_rate_goal_{g_idx.item()}"
+                            key = f"nll_goal_{g_idx.item()}"
                             metrics[key].append(nll_per_msg[mask].mean().item())
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}
