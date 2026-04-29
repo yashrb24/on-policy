@@ -389,24 +389,26 @@ class MAPPOTrainer(nn.Module):
                         total_loss = total_loss + self.config.lambda_comms * nll_bwd.sum(dim=-1).mean()
 
                 # ── Step 4: optimizer step ────────────────────────────────────────
-                self.optim.zero_grad(set_to_none=True)
-                total_loss.backward()
-                # Phase 2: zero gradients for listener/critic/channel so only the
-                # speaker is updated by the entropy loss.
-                if self._training_phase == 2:
-                    for p in (list(self.listener.parameters())
-                              + list(self.critic.parameters())
-                              + list(self.channel.parameters())):
-                        if p.grad is not None:
-                            p.grad.zero_()
-                # Capture speaker gradient norm BEFORE clipping (raw signal strength)
-                speaker_grad_norm = float(sum(
-                    p.grad.detach().norm().item() ** 2
-                    for p in self.speaker.parameters()
-                    if p.grad is not None
-                ) ** 0.5)
-                nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
-                self.optim.step()
+                speaker_grad_norm = 0.0
+                if total_loss.grad_fn is not None:
+                    self.optim.zero_grad(set_to_none=True)
+                    total_loss.backward()
+                    # Phase 2: zero gradients for listener/critic/channel so only the
+                    # speaker is updated by the entropy loss.
+                    if self._training_phase == 2:
+                        for p in (list(self.listener.parameters())
+                                  + list(self.critic.parameters())
+                                  + list(self.channel.parameters())):
+                            if p.grad is not None:
+                                p.grad.zero_()
+                    # Capture speaker gradient norm BEFORE clipping (raw signal strength)
+                    speaker_grad_norm = float(sum(
+                        p.grad.detach().norm().item() ** 2
+                        for p in self.speaker.parameters()
+                        if p.grad is not None
+                    ) ** 0.5)
+                    nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
+                    self.optim.step()
                 metrics["speaker_grad_norm"].append(speaker_grad_norm)
                 metrics["training_phase"].append(float(self._training_phase))
                 metrics["bwd_gate_active"].append(float(_bwd_gate_active))
