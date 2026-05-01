@@ -74,6 +74,32 @@ def run_training():
         args_list.extend(['--num_messages', str(config.num_messages)])
     if hasattr(config, 'ddcl_variation'):
         args_list.extend(['--ddcl_variation', str(config.ddcl_variation)])
+    if hasattr(config, 'channel') and config.channel is not None:
+        args_list.extend(['--channel', str(config.channel)])
+
+    # delta_config is a shorthand for the 4 mutually-exclusive delta modes.
+    # It avoids illegal WandB grid combos (delta_learnable + delta_global_learnable
+    # are mutually exclusive; fixed delta values only apply when both are false).
+    if hasattr(config, 'delta_config'):
+        _delta_map = {
+            'fixed_10':        (0.1,          False, False),
+            'fixed_15':        (1.0 / 15.0,   False, False),
+            'learnable_global': (1.0,          False, True),
+            'learnable_perdim': (1.0,          True,  False),
+        }
+        _delta_val, _dl, _dgl = _delta_map[config.delta_config]
+        args_list.extend(['--delta', str(_delta_val)])
+        if _dl:
+            args_list.append('--delta_learnable')
+        if _dgl:
+            args_list.append('--delta_global_learnable')
+    else:
+        if hasattr(config, 'delta') and config.delta is not None:
+            args_list.extend(['--delta', str(config.delta)])
+        if getattr(config, 'delta_learnable', False):
+            args_list.append('--delta_learnable')
+        if getattr(config, 'delta_global_learnable', False):
+            args_list.append('--delta_global_learnable')
 
     # Set CUDA device if needed
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -83,7 +109,7 @@ def run_training():
     print(f"  entropy_coef={config.entropy_coef}, clip_param={config.clip_param}")
     print(f"  n_block={config.n_block}, n_embd={config.n_embd}, n_head={config.n_head}")
     if getattr(config, 'use_comms_channel', False):
-        print(f"  DDCL: comm_coeff={config.comm_coeff}, num_messages={config.num_messages}, variation={getattr(config, 'ddcl_variation', 'new')}")
+        print(f"  DDCL: comm_coeff={getattr(config, 'comm_coeff', None)}, num_messages={getattr(config, 'num_messages', None)}, variation={getattr(config, 'ddcl_variation', 'new')}, channel={getattr(config, 'channel', None)}, delta_config={getattr(config, 'delta_config', None)}")
 
     # Call the main function directly
     try:

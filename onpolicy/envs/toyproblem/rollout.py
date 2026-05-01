@@ -6,7 +6,7 @@ each episode records (goal_x, goal_y, trajectory_length, trajectory_bits,
 success).
 
 Per-step bits:
-  • DDCL channels (sd, nsd): `channel.comms_loss(z).sum(-1)` — Jensen bound.
+  • DDCL channels (sd, tpdf, async_sd): `channel.comms_loss(z).sum(-1)` — Jensen bound.
   • IdentityChannel (none, Exp D entropic): `32 * z_dim` — float32 uncompressed
     cost, since comms_loss returns zero for identity.
 """

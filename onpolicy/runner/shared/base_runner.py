@@ -136,7 +136,13 @@ class Runner(object):
     def train(self):
         """Train policies with data in buffer. """
         self.trainer.prep_training()
-        train_infos = self.trainer.train(self.buffer)      
+        result = self.trainer.train(self.buffer)
+        # trainer.train() returns (train_info, delta_info); support plain dict for other trainers
+        if isinstance(result, tuple):
+            train_infos, self._delta_info = result
+        else:
+            train_infos = result
+            self._delta_info = {}
         self.buffer.after_update()
         return train_infos
 
@@ -172,6 +178,18 @@ class Runner(object):
                 wandb.log({k: v}, step=total_num_steps)
             else:
                 self.writter.add_scalars(k, {k: v}, total_num_steps)
+
+        # Log learnable delta values: one grouped chart per channel (key / out), per block
+        delta_info = getattr(self, '_delta_info', {})
+        for k, v in delta_info.items():
+            if isinstance(v, torch.Tensor) and v.numel() > 1:
+                dim_dict = {f"d{i}": float(v[i]) for i in range(v.numel())}
+            else:
+                dim_dict = {"d0": float(v)}
+            if self.use_wandb:
+                wandb.log({k: dim_dict}, step=total_num_steps)
+            else:
+                self.writter.add_scalars(k, dim_dict, total_num_steps)
 
     def log_env(self, env_infos, total_num_steps):
         """

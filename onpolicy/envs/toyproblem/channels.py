@@ -6,7 +6,7 @@ from torch import nn
 
 
 class IdentityChannel(nn.Module):
-    """No-op passthrough so `--channel none` shares the same call shape as SD/NSD."""
+    """No-op passthrough so `--channel none` shares the same call shape as SD/TPDF."""
 
     def __init__(
         self,
@@ -92,8 +92,8 @@ class DDCL_SD(nn.Module):
         return torch.log2(z.abs() / self.delta + 1)
 
 
-class DDCL_NSD(nn.Module):
-    """Non-subtractive-dithering DDCL (user's Implementation 2).
+class DDCL_TPDF(nn.Module):
+    """TPDF (triangular-PDF) dither DDCL (user's Implementation 2).
 
     Triangular dither ν = u₁ + u₂, uᵢ ~ U(-δ/2, δ/2); receiver outputs the
     bin center (no ε subtraction, no shared RNG). Schuchman's theorem gives
@@ -144,7 +144,7 @@ class DDCL_NSD(nn.Module):
         return z_hat, info
 
     def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
-        """Same Jensen bound as SD — derivation carries over under NSD."""
+        """Same Jensen bound as SD — derivation carries over under TPDF."""
         return torch.log2(z.abs() / self.delta + 1)
 
 
@@ -215,7 +215,7 @@ def build_channel(
     delta_global_learnable: bool = False,
     zdim: int = 1,
 ) -> nn.Module:
-    table = {"none": IdentityChannel, "sd": DDCL_SD, "nsd": DDCL_NSD, "async_sd": DDCL_Async_SD}
+    table = {"none": IdentityChannel, "sd": DDCL_SD, "tpdf": DDCL_TPDF, "async_sd": DDCL_Async_SD}
     if name not in table:
         raise ValueError(f"Unknown channel {name!r}; expected one of {list(table)}")
     return table[name](

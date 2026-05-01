@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .util import init
+from onpolicy.envs.toyproblem.channels import build_channel
 
 
 def init_(m, gain=0.01, activate=False):
@@ -17,7 +18,9 @@ def init_(m, gain=0.01, activate=False):
 class SelfAttention(nn.Module):
 
     def __init__(self, n_embd, n_head, masked=False, use_comms_channel=False, num_messages=15,
-                 use_fake_quantization=False, quant_bits=8, ddcl_variation="new"):
+                 use_fake_quantization=False, quant_bits=8,
+                 channel_name="tpdf", delta=1.0,
+                 delta_learnable=False, delta_global_learnable=False):
         super(SelfAttention, self).__init__()
 
         assert n_embd % n_head == 0
@@ -25,11 +28,8 @@ class SelfAttention(nn.Module):
         self.n_head = n_head
         self.n_embd = n_embd
 
-        # Communication channel parameters (backward compatible)
         self.use_comms_channel = use_comms_channel
         self.num_messages = num_messages
-        self.delta = 1 / num_messages
-        self.ddcl_variation = ddcl_variation
 
         # Quantization parameters
         self.use_fake_quantization = use_fake_quantization
@@ -50,14 +50,73 @@ class SelfAttention(nn.Module):
         self.comm_loss = 0
         self.comm_bits = 0
 
-    def get_comms_noise(self, target):
-        """Generate communication channel noise."""
-        # calculate noise as per comms protocol
-        noise = (torch.rand_like(target, device=target.device) - 0.5) * 2
-        delta = (1 / self.num_messages)
-        noise = noise * delta * 0.5
+        # Channel instances: key_channel operates on (B, nh, L, hs), out_channel on (B, L, n_embd)
+        hs = n_embd // n_head
+        if use_comms_channel:
+            self.key_channel = build_channel(
+                channel_name, delta=delta,
+                delta_learnable=delta_learnable,
+                delta_global_learnable=delta_global_learnable,
+                zdim=hs,
+            )
+            self.out_channel = build_channel(
+                channel_name, delta=delta,
+                delta_learnable=delta_learnable,
+                delta_global_learnable=delta_global_learnable,
+                zdim=n_embd,
+            )
+        else:
+            self.key_channel = None
+            self.out_channel = None
 
-        return noise
+    def _masked_comms_loss(self, channel, z, active_masks):
+        """Apply channel.comms_loss(z) and reduce with active_masks."""
+        raw = channel.comms_loss(z)
+        batch_size = z.size(0)
+        if active_masks is not None:
+            if z.dim() == 4:
+                mask_expanded = active_masks.unsqueeze(1).expand(
+                    batch_size, z.size(1), z.size(2), 1).expand_as(z)
+            elif z.dim() == 3:
+                mask_expanded = active_masks.expand_as(z)
+            else:
+                raise ValueError(f"Expected 3D or 4D tensor, got {z.dim()}D")
+            raw = raw * mask_expanded
+            active_elements = mask_expanded.sum()
+            if active_elements > 0:
+                return raw.sum() / active_elements
+            else:
+                return torch.tensor(0.0, device=z.device, dtype=z.dtype)
+        else:
+            return torch.mean(torch.sum(raw.reshape(batch_size, -1), dim=1))
+
+    def get_delta_metrics(self) -> dict:
+        """Return current delta values for key and out channels as a flat dict.
+
+        Only populated when use_comms_channel=True and at least one delta mode is
+        learnable. For fixed delta returns an empty dict (nothing to track).
+        Keys:
+          key_delta       — scalar (global learnable) or 1-D tensor (per-dim learnable)
+          out_delta       — same, for the out_channel
+        Values are detached from the graph.
+        """
+        if not self.use_comms_channel:
+            return {}
+        key_ch = self.key_channel
+        out_ch = self.out_channel
+        is_learnable = (
+            getattr(key_ch, '_delta_learnable', False) or
+            getattr(key_ch, '_delta_global_learnable', False)
+        )
+        if not is_learnable:
+            return {}
+        key_d = key_ch.delta
+        out_d = out_ch.delta
+        if isinstance(key_d, torch.Tensor):
+            key_d = key_d.detach()
+        if isinstance(out_d, torch.Tensor):
+            out_d = out_d.detach()
+        return {"key_delta": key_d, "out_delta": out_d}
 
     def compute_component_log_loss(self, z, active_masks=None):
         """
@@ -201,20 +260,10 @@ class SelfAttention(nn.Module):
         q = self.query(query).view(B, L, self.n_head, D // self.n_head).transpose(1, 2)  # (B, nh, L, hs)
         v = self.value(value).view(B, L, self.n_head, D // self.n_head).transpose(1, 2)  # (B, nh, L, hs)
 
-        # Apply communication channel noise if enabled
+        # Apply communication channel to keys if enabled
         if self.use_comms_channel:
-            # Add noise to keys
-            if self.ddcl_variation == "old":
-                k_noise = self.get_comms_noise(k)
-                k = k + k_noise
-            else:
-                k_noise_1 = self.get_comms_noise(k)
-                k_noise_2 = self.get_comms_noise(k)
-                k_noise = k_noise_1 + k_noise_2
-                k = (self.delta * (torch.floor((k + k_noise) / self.delta) + 0.5) - k).detach() + k
-
-            # Track communication metrics for keys
-            self.comm_loss += self.compute_component_log_loss(k, active_masks)
+            k, _ = self.key_channel(k)
+            self.comm_loss += self._masked_comms_loss(self.key_channel, k, active_masks)
             self.comm_bits += self.compute_num_bits_used(k, active_masks)
 
         elif self.use_fake_quantization:
@@ -250,19 +299,10 @@ class SelfAttention(nn.Module):
         y = att @ v  # (B, nh, L, L) x (B, nh, L, hs) -> (B, nh, L, hs)
         y = y.transpose(1, 2).contiguous().view(B, L, D)  # re-assemble all head outputs side by side
 
-        # Apply communication channel noise to output if enabled
+        # Apply communication channel to output if enabled
         if self.use_comms_channel:
-            if self.ddcl_variation == "old":
-                y_noise = self.get_comms_noise(y)
-                y = y + y_noise
-            else:
-                y_noise_1 = self.get_comms_noise(y)
-                y_noise_2 = self.get_comms_noise(y)
-                y_noise = y_noise_1 + y_noise_2
-                y = (self.delta * (torch.floor((y + y_noise) / self.delta) + 0.5) - y).detach() + y
-
-            # Track communication metrics for output
-            self.comm_loss += self.compute_component_log_loss(y, active_masks)
+            y, _ = self.out_channel(y)
+            self.comm_loss += self._masked_comms_loss(self.out_channel, y, active_masks)
             self.comm_bits += self.compute_num_bits_used(y, active_masks)
 
         elif self.use_fake_quantization:
@@ -281,7 +321,8 @@ class EncodeBlock(nn.Module):
     """ an unassuming Transformer block """
 
     def __init__(self, n_embd, n_head, use_comms_channel=False, num_messages=15, use_fake_quantization=False,
-                 quant_bits=8, ddcl_variation="new"):
+                 quant_bits=8, channel_name="tpdf", delta=1.0,
+                 delta_learnable=False, delta_global_learnable=False):
         super(EncodeBlock, self).__init__()
 
         self.ln1 = nn.LayerNorm(n_embd)
@@ -291,7 +332,10 @@ class EncodeBlock(nn.Module):
                                   num_messages=num_messages,
                                   use_fake_quantization=use_fake_quantization,
                                   quant_bits=quant_bits,
-                                  ddcl_variation=ddcl_variation)
+                                  channel_name=channel_name,
+                                  delta=delta,
+                                  delta_learnable=delta_learnable,
+                                  delta_global_learnable=delta_global_learnable)
         self.mlp = nn.Sequential(
             init_(nn.Linear(n_embd, 1 * n_embd), activate=True),
             nn.GELU(),
@@ -304,14 +348,15 @@ class EncodeBlock(nn.Module):
         return x
 
     def get_comm_metrics(self):
-        """Return communication loss and bits from attention layer."""
-        return self.attn.comm_loss, self.attn.comm_bits
+        """Return communication loss, bits, and delta metrics from attention layer."""
+        return self.attn.comm_loss, self.attn.comm_bits, self.attn.get_delta_metrics()
 
 
 class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, obs_shape, n_block, n_embd, n_head, use_comms_channel=False, num_messages=15,
-                 use_fake_quantization=False, quant_bits=8, ddcl_variation="new"):
+                 use_fake_quantization=False, quant_bits=8, channel_name="tpdf", delta=1.0,
+                 delta_learnable=False, delta_global_learnable=False):
         super(TransformerEncoderLayer, self).__init__()
 
         self.obs_dim = obs_shape
@@ -327,7 +372,10 @@ class TransformerEncoderLayer(nn.Module):
                                                  num_messages=num_messages,
                                                  use_fake_quantization=use_fake_quantization,
                                                  quant_bits=quant_bits,
-                                                 ddcl_variation=ddcl_variation)
+                                                 channel_name=channel_name,
+                                                 delta=delta,
+                                                 delta_learnable=delta_learnable,
+                                                 delta_global_learnable=delta_global_learnable)
                                      for _ in range(n_block)])
 
     def forward(self, obs, active_masks=None):
@@ -339,14 +387,18 @@ class TransformerEncoderLayer(nn.Module):
         # Track total communication metrics across all blocks
         total_comm_loss = 0
         total_comm_bits = 0
+        # delta_metrics: flat dict keyed "block{i}_key_delta" / "block{i}_out_delta"
+        delta_metrics: dict = {}
 
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x = block(x, active_masks)
-            comm_loss, comm_bits = block.get_comm_metrics()
+            comm_loss, comm_bits, blk_delta = block.get_comm_metrics()
             total_comm_loss += comm_loss
             total_comm_bits += comm_bits
+            for k, v in blk_delta.items():
+                delta_metrics[f"block{i}_{k}"] = v
 
-        return x, (total_comm_loss, total_comm_bits)
+        return x, (total_comm_loss, total_comm_bits, delta_metrics)
 
 
 class TransformerEncoderBase(nn.Module):
@@ -369,9 +421,21 @@ class TransformerEncoderBase(nn.Module):
         use_fake_quantization = args.use_fake_quantization
         quant_bits = args.quant_bits
 
-        # DDCL variation
-        ddcl_variation = args.ddcl_variation
-        assert ddcl_variation in ["new", "old"]
+        # Resolve channel name: prefer --channel, fall back to --ddcl_variation mapping
+        channel_name = getattr(args, 'channel', None)
+        if channel_name is None:
+            _map = {"old": "sd", "new": "tpdf"}
+            ddcl_variation = getattr(args, 'ddcl_variation', 'new')
+            channel_name = _map.get(ddcl_variation, "tpdf")
+        if not use_comms_channel:
+            channel_name = "none"
+
+        delta = getattr(args, 'delta', None)
+        if delta is None:
+            delta = 1.0 / num_messages  # backwards compat: old delta = 1/num_messages
+
+        delta_learnable        = getattr(args, 'delta_learnable', False)
+        delta_global_learnable = getattr(args, 'delta_global_learnable', False)
 
         # Store flag for communication metrics calculation
         self.calc_comm_metrics = calc_comm_metrics and use_comms_channel
@@ -383,7 +447,10 @@ class TransformerEncoderBase(nn.Module):
             num_messages=num_messages,
             use_fake_quantization=use_fake_quantization,
             quant_bits=quant_bits,
-            ddcl_variation=ddcl_variation
+            channel_name=channel_name,
+            delta=delta,
+            delta_learnable=delta_learnable,
+            delta_global_learnable=delta_global_learnable,
         )
 
     def forward(self, x, active_masks=None):
@@ -401,12 +468,9 @@ class TransformerEncoderBase(nn.Module):
                 - x: Encoded representations
                 - (comm_loss, comm_bits): Communication metrics tuple
         """
-        x, comm_metrics = self.transformer_encoder(x, active_masks)
+        x, (comm_loss, comm_bits, delta_metrics) = self.transformer_encoder(x, active_masks)
 
-        # Return based on whether communication metrics calculation is enabled
         if self.calc_comm_metrics:
-            # Return with communication metrics when calculation is enabled
-            return x, comm_metrics
+            return x, (comm_loss, comm_bits, delta_metrics)
         else:
-            # return just x when metrics calculation is disabled
             return x

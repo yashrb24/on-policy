@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entropy_coef", type=float, default=0.03)
     p.add_argument("--max_grad_norm", type=float, default=0.5)
     p.add_argument("--z_dim", type=int, default=3)
-    p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "nsd", "async_sd"])
+    p.add_argument("--channel", type=str, default="none", choices=["none", "sd", "tpdf", "async_sd"])
     p.add_argument("--delta", type=float, default=1.0)
     p.add_argument("--delta_learnable", action="store_true")
     p.add_argument("--delta_global_learnable", action="store_true")
@@ -215,7 +215,7 @@ def main() -> None:
     diag_file.close()
 
     # Post-training per-goal evaluation: one speaker pass per goal, no sampling.
-    # Writes: goal_x, goal_y, goal_prob, z_norm, bits_channel (sd/nsd only),
+    # Writes: goal_x, goal_y, goal_prob, z_norm, bits_channel (sd/tpdf/async_sd only),
     #         bits_prior (entropic only; = -log2 p(z) under GMM).
     goals_np = env.goals.astype(np.float32)
     probs_np = env.goal_probs.astype(np.float32)
