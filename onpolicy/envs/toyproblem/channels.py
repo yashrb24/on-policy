@@ -208,6 +208,59 @@ class DDCL_Async_SD(nn.Module):
         return torch.log2(z.abs() / self.delta + 1)
 
 
+class DDCL_AD(nn.Module):
+    """Additive-dithering DDCL 
+    delta_learnable=True         → per-dim softplus(raw_delta), shape (zdim,)
+    delta_global_learnable=True  → shared scalar softplus(raw_delta), shape (1,)
+    both False                   → fixed scalar self._delta
+    """
+
+    def __init__(
+        self,
+        delta: float = 1.0,
+        delta_learnable: bool = False,
+        delta_global_learnable: bool = False,
+        zdim: int = 1,
+    ) -> None:
+        super().__init__()
+        self._delta_learnable = delta_learnable
+        self._delta_global_learnable = delta_global_learnable
+        if delta_learnable:
+            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
+            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+        elif delta_global_learnable:
+            self.raw_delta = nn.Parameter(torch.zeros(1))
+        else:
+            self._delta = delta
+
+    @property
+    def delta(self) -> torch.Tensor | float:
+        if self._delta_learnable or self._delta_global_learnable:
+            return F.softplus(self.raw_delta)
+        return self._delta
+
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
+        d = self.delta
+
+        eps = (torch.rand_like(z) - 0.5) * d
+        z_prime = z + eps
+        m = torch.floor(z_prime / d)
+        C_m = (m + 0.5) * d
+        z_hat = z + (C_m - z).detach()
+
+        info = {
+            "m": m,
+            "C_m": C_m,
+            "z_prime": z_prime,
+            "eps": eps,
+        }
+        return z_hat, info
+
+    def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
+        """Per-element Jensen upper bound on expected bit length."""
+        return torch.log2(z.abs() / self.delta + 1)
+
+
 def build_channel(
     name: str,
     delta: float,
@@ -215,7 +268,7 @@ def build_channel(
     delta_global_learnable: bool = False,
     zdim: int = 1,
 ) -> nn.Module:
-    table = {"none": IdentityChannel, "sd": DDCL_SD, "tpdf": DDCL_TPDF, "async_sd": DDCL_Async_SD}
+    table = {"none": IdentityChannel, "sd": DDCL_SD, "tpdf": DDCL_TPDF, "async_sd": DDCL_Async_SD, "ad": DDCL_AD}
     if name not in table:
         raise ValueError(f"Unknown channel {name!r}; expected one of {list(table)}")
     return table[name](

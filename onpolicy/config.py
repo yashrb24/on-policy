@@ -348,8 +348,8 @@ def get_config():
     parser.add_argument("--ddcl_variation", type=str, default="new", choices=["old", "new"],
                         help="DDCL variation to use: 'old' (single noise) or 'new' (double noise + quantization)")
     parser.add_argument("--channel", type=str, default=None,
-                        choices=["none", "sd", "tpdf", "async_sd"],
-                        help="Channel class: none/sd/tpdf/async_sd. If omitted, derived from --ddcl_variation.")
+                        choices=["none", "sd", "tpdf", "async_sd", "ad"],
+                        help="Channel class: none/sd/tpdf/async_sd/ad. If omitted, derived from --ddcl_variation.")
     parser.add_argument("--delta", type=float, default=None,
                         help="Quantization step delta. If omitted, computed as 1/num_messages.")
     parser.add_argument("--delta_learnable", action="store_true", default=False,
