@@ -83,8 +83,6 @@ class PredatorPreyEnv(gym.Env):
         else:
             self.naction = 4
 
-        self.action_space = spaces.MultiDiscrete([self.naction])
-
         self.BASE = (dims[0] * dims[1])
         self.OUTSIDE_CLASS += self.BASE
         self.PREY_CLASS += self.BASE
@@ -99,6 +97,8 @@ class PredatorPreyEnv(gym.Env):
 
         # Number of agents that will have observations (predators + prey if enemy_comm enabled)
         self.n_agents = self.npredator if not self.enemy_comm else self.npredator + self.nprey
+
+        self.action_space = [spaces.Discrete(self.naction) for _ in range(self.n_agents)]
 
         self.observation_space = [spaces.Box(low=0, high=1,
                                              shape=(obs_dim,),
