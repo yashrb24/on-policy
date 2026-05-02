@@ -1,9 +1,9 @@
-# WandB Sweep Configuration for PredatorPrey Medium — No DDCL Baseline
+# WandB Sweep Configuration for PredatorPrey Hard — No DDCL Baseline
 # Sweeps: seed x comm_coeff (lambda) only; channel=none means no quantization.
 # 1 channel x 5 lambda x 3 seeds = 15 runs
 
 program: sweep_wrapper.py
-name: ddcl-sweep-pp-medium-none
+name: ddcl-sweep-pp-hard-none
 method: grid
 project: ddcl-applications
 metric:
@@ -15,17 +15,17 @@ parameters:
   env_name:
     value: PredatorPrey
   scenario_name:
-    value: medium
+    value: hard
   algorithm_name:
     value: rmappo
   num_agents:
-    value: 5
+    value: 10
   num_env_steps:
     value: 3000000
   episode_length:
-    value: 40
+    value: 80
   dim:
-    value: 10
+    value: 20
   vision:
     value: 1
   n_rollout_threads:
