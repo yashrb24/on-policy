@@ -52,8 +52,10 @@ class DDCL_SD(nn.Module):
         self._delta_learnable = delta_learnable
         self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
-            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+            # Small random init breaks symmetry across dims/blocks/channels;
+            # otherwise identical zeros + LayerNorm-equalized |z| make all dims
+            # evolve in lockstep. softplus(N(0, 0.1²)) ≈ ln 2 ± ~0.07.
+            self.raw_delta = nn.Parameter(torch.randn(zdim) * 0.1)
         elif delta_global_learnable:
             self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
@@ -116,7 +118,7 @@ class DDCL_TPDF(nn.Module):
         self._delta_learnable = delta_learnable
         self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+            self.raw_delta = nn.Parameter(torch.randn(zdim) * 0.1)
         elif delta_global_learnable:
             self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
@@ -167,8 +169,7 @@ class DDCL_Async_SD(nn.Module):
         self._delta_learnable = delta_learnable
         self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
-            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+            self.raw_delta = nn.Parameter(torch.randn(zdim) * 0.1)
         elif delta_global_learnable:
             self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
@@ -181,7 +182,7 @@ class DDCL_Async_SD(nn.Module):
         return self._delta
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        
+
         d = self.delta
 
         eps1 = (torch.rand_like(z) - 0.5) * d
@@ -226,8 +227,7 @@ class DDCL_AD(nn.Module):
         self._delta_learnable = delta_learnable
         self._delta_global_learnable = delta_global_learnable
         if delta_learnable:
-            # softplus(0) = ln(2) ≈ 0.693, a reasonable starting δ
-            self.raw_delta = nn.Parameter(torch.zeros(zdim))
+            self.raw_delta = nn.Parameter(torch.randn(zdim) * 0.1)
         elif delta_global_learnable:
             self.raw_delta = nn.Parameter(torch.zeros(1))
         else:
