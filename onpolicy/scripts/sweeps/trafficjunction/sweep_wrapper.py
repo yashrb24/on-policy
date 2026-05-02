@@ -95,9 +95,6 @@ def run_training():
     if getattr(config, 'delta_global_learnable', False):
         args_list.append('--delta_global_learnable')
 
-    # Set CUDA device if needed
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
     print(f"Starting training with sweep config:")
     print(f"  lr={config.lr}, critic_lr={config.critic_lr}")
     print(f"  entropy_coef={config.entropy_coef}, clip_param={config.clip_param}")
