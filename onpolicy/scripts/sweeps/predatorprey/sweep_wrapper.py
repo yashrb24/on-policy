@@ -113,8 +113,9 @@ def run_training():
 
     # Call the main function directly
     try:
+        run_id = wandb.run.id if wandb.run else "unknown"
         main(args_list)
-        print(f"Training completed successfully for run {wandb.run.id}")
+        print(f"Training completed successfully for run {run_id}")
     except Exception as e:
         print(f"Training failed with error: {e}")
         import traceback
