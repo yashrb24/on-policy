@@ -260,17 +260,15 @@ class SelfAttention(nn.Module):
         q = self.query(query).view(B, L, self.n_head, D // self.n_head).transpose(1, 2)  # (B, nh, L, hs)
         v = self.value(value).view(B, L, self.n_head, D // self.n_head).transpose(1, 2)  # (B, nh, L, hs)
 
-        # Apply communication channel to keys if enabled
+        # Apply communication channel to keys if enabled.
         if self.use_comms_channel:
-            k, _ = self.key_channel(k)
             self.comm_loss += self._masked_comms_loss(self.key_channel, k, active_masks)
+            k, _ = self.key_channel(k)
             self.comm_bits += self.compute_num_bits_used(k, active_masks)
 
         elif self.use_fake_quantization:
-            k = self.apply_fake_quantization(k)
-
-            # Track communication metrics for keys
             self.comm_loss += self.compute_quantization_loss(k, active_masks)
+            k = self.apply_fake_quantization(k)
             self.comm_bits += self.compute_quantization_bits(k, active_masks)
 
         # causal attention: (B, nh, L, hs) x (B, nh, hs, L) -> (B, nh, L, L)
@@ -299,17 +297,15 @@ class SelfAttention(nn.Module):
         y = att @ v  # (B, nh, L, L) x (B, nh, L, hs) -> (B, nh, L, hs)
         y = y.transpose(1, 2).contiguous().view(B, L, D)  # re-assemble all head outputs side by side
 
-        # Apply communication channel to output if enabled
+        # Apply communication channel to output if enabled.
         if self.use_comms_channel:
-            y, _ = self.out_channel(y)
             self.comm_loss += self._masked_comms_loss(self.out_channel, y, active_masks)
+            y, _ = self.out_channel(y)
             self.comm_bits += self.compute_num_bits_used(y, active_masks)
 
         elif self.use_fake_quantization:
-            y = self.apply_fake_quantization(y)
-
-            # Track communication metrics for output
             self.comm_loss += self.compute_quantization_loss(y, active_masks)
+            y = self.apply_fake_quantization(y)
             self.comm_bits += self.compute_quantization_bits(y, active_masks)
 
         # output projection
