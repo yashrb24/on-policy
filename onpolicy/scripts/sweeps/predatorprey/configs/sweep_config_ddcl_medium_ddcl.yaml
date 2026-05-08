@@ -9,10 +9,10 @@
 #   learnable_global  -> --delta_global_learnable  (single scalar)
 #   learnable_perdim  -> --delta_learnable  (one scalar per embedding dim)
 #
-# 3 channels x 4 delta_configs x 5 lambda x 3 seeds = 180 runs
+# 4 channels x 4 delta_configs x 5 lambda x 3 seeds = 240 runs
 
 program: sweep_wrapper.py
-name: ddcl-sweep-pp-medium-ddcl
+name: pp-medium-channels-delta-sweep
 method: grid
 project: ddcl-applications
 metric:
@@ -82,6 +82,6 @@ parameters:
   comm_coeff:
     values: [0.0001, 0.0004, 0.0007, 0.001, 0.004]
   channel:
-    values: ["sd", "tpdf", "async_sd"]
+    values: ["sd", "tpdf", "async_sd", "ad"]
   delta_config:
     values: ["fixed_10", "fixed_15", "learnable_global", "learnable_perdim"]
