@@ -119,6 +119,7 @@ class SelfAttention(nn.Module):
         return {"key_delta": key_d, "out_delta": out_d}
 
     def compute_component_log_loss(self, z, active_masks=None):
+        raise ValueError("compute_component_log_loss is deprecated; use _masked_comms_loss instead")
         """
         Computes the communication penalty loss given by log2(2 * |M| * |z| + 1)
         """

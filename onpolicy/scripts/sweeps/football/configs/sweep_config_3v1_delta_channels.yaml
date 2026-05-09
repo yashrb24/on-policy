@@ -2,7 +2,7 @@
 # Grid sweep over seeds, comm_coeff (lambda), and num_messages (delta)
 # All other hyperparameters fixed to best values from train_football_3v1.sh
 
-program: sweep_wrapper.py
+program: sweep_wrapper_delta_channels.py
 method: grid
 name: 3v1_delta_channels_grid
 project: ddcl-applications
