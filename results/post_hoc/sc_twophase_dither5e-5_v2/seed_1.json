@@ -1,0 +1,20 @@
+{
+  "N_messages": 50000,
+  "z_dim": 3,
+  "delta": 1.0,
+  "H_G_bits": 1.8127636233227817,
+  "H_joint_bits": 2.47777744970727,
+  "H_factored_bits": 5.8044147984667775,
+  "TC_bits": 3.3266373487595073,
+  "H_dither_bits": 0.6594539273716509,
+  "eps_estimator_bits": -0.0011272923632619225,
+  "eps_MLE_bound": 0.1923018460649819,
+  "K_obs_joint_tuples": 43,
+  "gap_factored_bits": 3.991651175143996,
+  "gap_joint_bits": 0.6650138263844885,
+  "decomp_sum_bits": 5.797727607090678,
+  "decomp_residual_bits": 0.0066871913760993,
+  "H_dim_0_bits": 1.995716808264554,
+  "H_dim_1_bits": 1.80491308885587,
+  "H_dim_2_bits": 2.0037849013463536
+}
