@@ -1,13 +1,18 @@
-# ── Generated outputs (large / regenerable) ──────────────────────────────────
+# ── Generated outputs ─────────────────────────────────────────────────────────
 **/runs/
 **/logs/
+**/results/
 **/nohup.out
 
-# Checkpoints
+# Data / figure files (regenerable from code + runs/)
 *.pt
 *.pth
+*.csv
+*.pdf
+*.png
+*.json
 
-# ── Script launcher logs (not source code) ───────────────────────────────────
+# ── Script launcher logs ──────────────────────────────────────────────────────
 scripts/experiment_log_*.txt
 scripts/pillar_experiments_*.log
 scripts/pillar_launch_stdout.txt
