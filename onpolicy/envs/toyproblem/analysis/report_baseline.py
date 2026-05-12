@@ -1,11 +1,11 @@
-"""Generate results/toyproblem/baseline.md from sweep run data.
+"""Generate baseline.md and figures from sweep run data.
 
 Usage (after Stage A / B sweeps complete):
 
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
         python -m onpolicy.envs.toyproblem.analysis.report_baseline \
-        --sweep_dir runs/toyproblem/sweep_stage_a \
-        --out_dir results/toyproblem/sweep_stage_a
+        --sweep_dir runs/sc_ablation \
+        --out_dir results
 
 Requires: analysis/load_runs.py, analysis/stats.py, analysis/paper_figures.py
 """
@@ -182,8 +182,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate baseline.md from sweep runs.")
     p.add_argument("--sweep_dir", type=str, required=True,
                    help="Root directory of sweep runs (contains <exp_name>/<seed>/ structure).")
-    p.add_argument("--out_dir", type=str, default="results/toyproblem",
-                   help="Directory to write baseline.md and plots/.")
+    p.add_argument("--out_dir", type=str, default="results",
+                   help="Directory to write baseline.md and plots/. Figures land in <out_dir>/figures/.")
     p.add_argument("--metric", type=str, default="success_rate")
     p.add_argument("--bits_col", type=str, default="bits_per_msg")
     p.add_argument("--window", type=int, default=20,

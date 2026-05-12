@@ -9,9 +9,17 @@ import torch
 from torch import nn
 
 from onpolicy.envs.toyproblem.buffer import RolloutBuffer
-from onpolicy.envs.toyproblem.channels import build_channel, H_GOAL_BITS
+from onpolicy.envs.toyproblem.channels import build_channel, H_GOAL_BITS, _GOAL_PROBS
+from onpolicy.envs.toyproblem.CommunicatingGoal_env import _DEFAULT_GOALS as _ENV_DEFAULT_GOALS
+from onpolicy.envs.toyproblem.source_coding import (
+    MessageHistogram,
+    dither_channel_loss,
+    dither_channel_stats,
+    histogram_rate_stats,
+    source_coding_rate_loss,
+)
 from onpolicy.envs.toyproblem.network import (
-    Critic, ListenerActor, SpeakerNetwork,
+    Critic, ListenerActor, SpeakerNetwork, PerChannelDelta,
     EntropyModelFactored, EntropyModelJoint,
     EntropyModelCondZ, EntropyModelJointCondZ,
     joint_entropy_bits, marginal_entropies_bits, total_correlation_bits,
@@ -62,6 +70,54 @@ class MAPPOConfig:
     # 0.0 = disabled (no phase switching).
     phase1_sr_threshold: float = 0.0
 
+    # P2 Option 1 — Source coding via Online Histogram + Score Function (§15)
+    # Replaces the DLM prior with an empirical frequency table, eliminating the
+    # qphi_gap bottleneck that caused the fix-ladder sweep to fail (gap 12-14 bits).
+    #
+    # use_source_coding:      enable the histogram rate loss (replaces DLM backward)
+    # source_coding_smoothing: Laplace α for histogram (Jeffreys prior: 0.5)
+    #
+    # When use_source_coding=True:
+    #   - loss_comms_mode="magnitude" → adds magnitude + score-function losses
+    #   - loss_comms_mode="entropy"   → score-function loss only (no magnitude)
+    #   - loss_comms_mode="both"      → magnitude + score-function losses
+    #   The existing use_entropy_model / DLM path is independent and can coexist
+    #   for measurement (forward pass only, no backward to speaker).
+    use_source_coding: bool = False
+    source_coding_smoothing: float = 0.5
+    # Phase 2 dither entropy loss — reduces H(m|goal) by pushing frac(z_k/δ) toward 0.5.
+    # For the floor SD channel, minimum dither noise is at frac = 0.5 (bin centres),
+    # not at frac = 0 (bin boundaries).  See source_coding.dither_channel_loss for
+    # the full derivation.  0.0 = disabled.  Only applied when training_phase == 2.
+    lambda_dither: float = 0.0
+
+    # F14/F19 diagnostic logging (off by default — adds compute overhead)
+    log_grad_decomp: bool = False    # F14: PPO vs SC speaker grad norms (per minibatch)
+    log_moving_target: bool = False  # F19: ‖Δθ‖ + offline H(m) (per update)
+    moving_target_n: int = 10_000   # F19: offline sample size for H(m) estimate
+
+    # P1 — Per-channel learnable δ_k (Pillar 1)
+    # learn_delta: replace global scalar δ with z_dim independent widths δ_k = softplus(α_k).
+    # learn_global_delta: learn a single global δ (1 param, broadcasts). E53 baseline for E54.
+    # lr_delta: dedicated Adam LR for α_k (10× smaller than speaker LR to reduce oscillation).
+    # Only active for SD / NSD channels. Design A: δ_k frozen at Phase 2 onset.
+    learn_delta: bool = False
+    learn_global_delta: bool = False
+    lr_delta: float = 1e-4
+    # heuristic_delta: at Phase 2 onset, set δ_k ∝ 1/H(m_k) from empirical histogram,
+    # then freeze. Baseline comparison for learned per-channel δ (E56). No optimizer.
+    heuristic_delta: bool = False
+
+    # P4 — Rao-Blackwell gradient estimator for task loss (Phase 1 only)
+    # use_rb_gradient: replace STE speaker task gradient with RB finite-difference estimator.
+    # rb_mode: "joint" (2 passes, all dims move together) | "per_dim" (2*z_dim passes, exact)
+    use_rb_gradient: bool = False
+    rb_mode: str = "joint"
+
+    # P3 — Deployment evaluation: route listener input through z_hat_true/z_hat_deploy
+    # instead of the STE z_hat used during training. Applies only to SD and NSD channels.
+    deploy_eval: bool = False
+
 
 class MAPPOTrainer(nn.Module):
     """Speaker + listener + centralized critic with a single Adam over all params.
@@ -103,6 +159,16 @@ class MAPPOTrainer(nn.Module):
         self._warmup_bits_final: float = float("nan")
         # Training phase: 1 = RL + comms (joint), 2 = entropy compression only
         self._training_phase: int = 1
+
+        # P2 Option 1 — Online histogram for source-coding rate loss.
+        # Reset each update() call; populated from the full rollout before PPO epochs.
+        self.histogram: MessageHistogram | None = None
+        if config.use_source_coding:
+            self.histogram = MessageHistogram(
+                z_dim=config.z_dim,
+                smoothing=config.source_coding_smoothing,
+            )
+
         if config.use_entropy_model:
             ctx = config.entropy_model_context
             typ = config.entropy_model_type
@@ -151,13 +217,44 @@ class MAPPOTrainer(nn.Module):
             self._trainable, lr=config.lr, eps=config.adam_eps
         )
 
+        # P1 — Per-channel δ_k (Pillar 1). Only for dithering channels.
+        self.per_channel_delta: PerChannelDelta | None = None
+        self.optim_delta: torch.optim.Adam | None = None
+        if (config.learn_delta or config.learn_global_delta) and config.channel in ("sd", "nsd"):
+            n_d = 1 if config.learn_global_delta else config.z_dim
+            self.per_channel_delta = PerChannelDelta(
+                n_d, delta_init=config.delta
+            ).to(device)
+            self.optim_delta = torch.optim.Adam(
+                self.per_channel_delta.parameters(),
+                lr=config.lr_delta,
+                eps=config.adam_eps,
+            )
+        elif config.heuristic_delta and config.channel in ("sd", "nsd"):
+            # Heuristic δ: starts at global delta_init, replaced at Phase 2 onset.
+            # No optimizer — purely rule-based assignment, then frozen.
+            self.per_channel_delta = PerChannelDelta(
+                config.z_dim, delta_init=config.delta
+            ).to(device)
+            self.per_channel_delta.log_alpha.requires_grad_(False)
+
     @torch.no_grad()
     def act_and_value(
         self, goal: torch.Tensor, listener_pos: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         z = self.speaker(goal)
-        z_hat, _ = self.channel(z)
-        dist = self.listener(torch.cat([listener_pos, z_hat], dim=-1))
+        _act_delta = self.per_channel_delta.delta() if self.per_channel_delta is not None else None
+        z_hat, ch_info = (
+            self.channel(z) if _act_delta is None else self.channel(z, _act_delta)
+        )
+        # P3: deployment eval routes listener through actual quantised output, not STE z_hat.
+        if self.config.deploy_eval and self.config.channel == "sd":
+            listener_input = ch_info["z_hat_deploy"]
+        elif self.config.deploy_eval and self.config.channel == "nsd":
+            listener_input = ch_info["z_hat_true"]
+        else:
+            listener_input = z_hat
+        dist = self.listener(torch.cat([listener_pos, listener_input], dim=-1))
         action = dist.sample()
         log_prob = dist.log_prob(action)
         state = torch.cat([listener_pos, goal], dim=-1)
@@ -190,6 +287,27 @@ class MAPPOTrainer(nn.Module):
                 and self.config.phase1_sr_threshold > 0.0
                 and sr >= self.config.phase1_sr_threshold):
             self._training_phase = 2
+            # Heuristic δ: set δ_k ∝ 1/H(m_k) before freezing.
+            if self.config.heuristic_delta and self.per_channel_delta is not None and self.histogram is not None:
+                H = self.histogram.empirical_entropy()  # list[float], per dim, in bits
+                H_max = max(H) if max(H) > 0.0 else 1.0
+                eps = 1e-3
+                import math as _math
+                with torch.no_grad():
+                    for k in range(self.config.z_dim):
+                        # Coarser bin (larger δ) for low-entropy dims; finer for high-entropy.
+                        delta_k = float(
+                            self.config.delta * H_max / max(H[k], eps)
+                        )
+                        delta_k = max(self.per_channel_delta.delta_min,
+                                      min(delta_k, self.per_channel_delta.delta_max))
+                        # Write back via softplus_inv so delta() returns delta_k exactly.
+                        self.per_channel_delta.log_alpha[k] = _math.log(
+                            _math.exp(delta_k) - 1.0
+                        )
+            # Design A: freeze δ_k at Phase 2 onset (learn_delta and heuristic_delta).
+            if self.per_channel_delta is not None:
+                self.per_channel_delta.log_alpha.requires_grad_(False)
             return True
         return False
 
@@ -231,7 +349,8 @@ class MAPPOTrainer(nn.Module):
                     break
                 with torch.no_grad():
                     z = self.speaker(mb["goals"])
-                    _, ch_info = self.channel(z)
+                    _wm_d = self.per_channel_delta.delta() if self.per_channel_delta is not None else None
+                    _, ch_info = self.channel(z) if _wm_d is None else self.channel(z, _wm_d)
                 m = ch_info.get("m")
                 if m is None:
                     return 0.0  # IdentityChannel — no discrete messages
@@ -266,10 +385,46 @@ class MAPPOTrainer(nn.Module):
 
         metrics: dict[str, list[float]] = defaultdict(list)
 
+        # ── Histogram E-step: populate counts from the full rollout ───────────
+        # m is not stored in the buffer; we recompute it via a no_grad forward pass
+        # over all minibatches before the PPO epoch loop.  This is the EM E-step:
+        # q_hist ← empirical_freq(m | current_policy), then freeze for M-step below.
+        _delta_estep = (
+            self.per_channel_delta.delta().detach()
+            if self.per_channel_delta is not None else None
+        )
+        if self.histogram is not None:
+            self.histogram.reset()
+            with torch.no_grad():
+                for mb_sc in buffer.minibatches(self.config.num_minibatches):
+                    z_sc = self.speaker(mb_sc["goals"])
+                    _, ch_info_sc = (
+                        self.channel(z_sc) if _delta_estep is None
+                        else self.channel(z_sc, _delta_estep)
+                    )
+                    m_sc = ch_info_sc.get("m")
+                    if m_sc is not None:
+                        self.histogram.update(m_sc)
+
+        # ── F19: snapshot speaker params before epoch loop ────────────────────
+        _speaker_params_before: list[torch.Tensor] | None = None
+        if self.config.log_moving_target:
+            _speaker_params_before = [
+                p.detach().clone() for p in self.speaker.parameters()
+            ]
+
         for _ in range(self.config.update_epochs):
             for mb in buffer.minibatches(self.config.num_minibatches):
+                # P1: get current per-channel δ (gradient-connected for Phase 1 updates).
+                _delta = (
+                    self.per_channel_delta.delta()
+                    if self.per_channel_delta is not None else None
+                )
                 z_new = self.speaker(mb["goals"])
-                z_hat, ch_info = self.channel(z_new)
+                z_hat, ch_info = (
+                    self.channel(z_new) if _delta is None
+                    else self.channel(z_new, _delta)
+                )
                 m = ch_info.get("m")
 
                 # ── Step 1: q_φ forward update BEFORE the RL step ─────────────────
@@ -308,7 +463,13 @@ class MAPPOTrainer(nn.Module):
                         self.optim_qphi_B.step()
 
                 # ── Step 2: RL losses ──────────────────────────────────────────────
-                dist = self.listener(torch.cat([mb["listener_pos"], z_hat], dim=-1))
+                # P4: when RB gradient is active, detach z_hat from the speaker so
+                # actor_loss gradient does NOT flow to speaker params; the RB proxy
+                # loss handles the speaker update instead.
+                _z_hat_for_listener = (
+                    z_hat.detach() if self.config.use_rb_gradient else z_hat
+                )
+                dist = self.listener(torch.cat([mb["listener_pos"], _z_hat_for_listener], dim=-1))
                 new_logp = dist.log_prob(mb["actions"])
                 entropy = dist.entropy()
 
@@ -331,7 +492,10 @@ class MAPPOTrainer(nn.Module):
                 new_value = self.critic(state_mb)
                 critic_loss = 0.5 * (new_value - returns_norm).pow(2).mean()
 
-                comms_per_elem = self.channel.comms_loss(z_new)
+                comms_per_elem = (
+                    self.channel.comms_loss(z_new) if _delta is None
+                    else self.channel.comms_loss(z_new, _delta)
+                )
                 comms_mean = comms_per_elem.mean()
 
                 # Phase 1: RL + magnitude comms.  Phase 2: entropy only (RL terms
@@ -342,8 +506,88 @@ class MAPPOTrainer(nn.Module):
                         if self.config.loss_comms_mode in ("magnitude", "both"):
                             total_loss = total_loss + self.config.lambda_comms * comms_mean
                 else:
-                    # Phase 2 — entropy-only.  Start with zero; entropy term below.
-                    total_loss = torch.zeros(1, device=self.device)
+                    # Phase 2 — include RL losses so the listener keeps adapting as
+                    # the speaker shifts its z distribution toward bin centres.
+                    # Without RL, the frozen listener cannot decode the new messages,
+                    # causing SR to degrade.  At SR=1 the RL pressure on the speaker
+                    # is near-zero, so entropy loss still dominates speaker updates.
+                    total_loss = actor_loss + critic_loss
+
+                # ── Step 2a: P4 Rao-Blackwell proxy loss (Phase 1 only, joint mode) ─
+                # Replaces the STE speaker task gradient with the finite-difference RB
+                # estimator: g_RB_k = (L(ẑ_hi) - L(ẑ_lo)) / δ_k.
+                # z_hat was detached above so actor_loss does NOT flow to speaker;
+                # rb_proxy_loss is the speaker's sole task gradient path.
+                _rb_task_loss: float = 0.0
+                if self.config.use_rb_gradient and self._training_phase == 1:
+                    _eff_d = _delta if _delta is not None else self.config.delta
+                    with torch.no_grad():
+                        frac = (z_new / _eff_d) - torch.floor(z_new / _eff_d)
+                        lo_frac = frac < 0.5
+                        m_floor = torch.floor(z_new / _eff_d)
+                        m_lo = torch.where(lo_frac, m_floor - 1, m_floor)
+                        m_hi = torch.where(lo_frac, m_floor, m_floor + 1)
+                        z_hat_lo = (m_lo + 0.5) * _eff_d   # (B, z_dim)
+                        z_hat_hi = (m_hi + 0.5) * _eff_d   # (B, z_dim)
+
+                    dist_lo = self.listener(
+                        torch.cat([mb["listener_pos"], z_hat_lo], dim=-1)
+                    )
+                    dist_hi = self.listener(
+                        torch.cat([mb["listener_pos"], z_hat_hi], dim=-1)
+                    )
+                    logp_lo = dist_lo.log_prob(mb["actions"])   # (B,)
+                    logp_hi = dist_hi.log_prob(mb["actions"])   # (B,)
+                    r_lo = torch.exp(logp_lo - mb["old_log_probs"])
+                    r_hi = torch.exp(logp_hi - mb["old_log_probs"])
+                    # Per-sample task loss at lo/hi bin centres (no PPO clipping)
+                    L_lo = -(r_lo * adv) - self.config.entropy_coef * dist_lo.entropy()
+                    L_hi = -(r_hi * adv) - self.config.entropy_coef * dist_hi.entropy()
+                    # Proxy loss: ∂/∂z_k = (L_hi - L_lo).detach() / δ_k (RB gradient)
+                    rb_scale = (L_hi - L_lo).detach().unsqueeze(-1) / _eff_d  # (B, z_dim)
+                    rb_proxy = (rb_scale * z_new).sum(dim=-1).mean()
+                    total_loss = total_loss + rb_proxy
+                    _rb_task_loss = (L_hi - L_lo).detach().mean().item()
+
+                # ── Step 2b: source-coding score function loss (Option 1 / §15) ──
+                # Uses histogram populated in the E-step above (frozen during M-step).
+                # Active in Phase 1 when loss_comms_mode is "entropy" or "both", and
+                # always active in Phase 2 (replaces DLM backward entirely).
+                _sc_loss_active = (
+                    self.histogram is not None and m is not None
+                    and self.config.lambda_comms > 0.0
+                    and (self.config.loss_comms_mode in ("entropy", "both")
+                         or self._training_phase == 2)
+                )
+                _sc_rate_loss_tensor: torch.Tensor | None = None
+                if _sc_loss_active:
+                    _sc_delta = _delta if _delta is not None else self.config.delta
+                    _sc_rate_loss_tensor = source_coding_rate_loss(
+                        z_new, self.histogram, _sc_delta, self.config.lambda_comms
+                    )
+                    total_loss = total_loss + _sc_rate_loss_tensor
+                    metrics["sc_rate_loss"].append(_sc_rate_loss_tensor.item())
+                else:
+                    metrics["sc_rate_loss"].append(0.0)
+
+                # ── Step 2c: dither channel entropy loss (Phase 2 only) ──────────
+                # Reduces H(m|goal) by pushing frac(z_k/δ) toward 0.5 (bin centres).
+                # For the floor SD channel, frac = 0.5 gives zero dither noise;
+                # frac = 0 gives maximum noise (1 bit/dim).  The corrected loss
+                # targets the true minimum, unlike the old H_binary(frac) formula
+                # which pushed toward frac = 0 (the maximum-noise locus).
+                # Only active in Phase 2 (task already converged) to avoid
+                # disrupting the SR=1 representation learned in Phase 1.
+                if (self._training_phase == 2
+                        and self.config.lambda_dither > 0.0):
+                    _dith_delta = _delta if _delta is not None else self.config.delta
+                    d_loss = dither_channel_loss(
+                        z_new, _dith_delta, self.config.lambda_dither
+                    )
+                    total_loss = total_loss + d_loss
+                    metrics["dither_loss"].append(d_loss.item())
+                else:
+                    metrics["dither_loss"].append(0.0)
 
                 # ── Step 3: entropy backward loss — context A ONLY ────────────────
                 # Context B backward is DISABLED: q_φ(m|z) conditions on the very z
@@ -388,17 +632,48 @@ class MAPPOTrainer(nn.Module):
                         # Use joint NLL (sum over dims) so λ scale is dim-independent
                         total_loss = total_loss + self.config.lambda_comms * nll_bwd.sum(dim=-1).mean()
 
+                # ── Step 3b: gradient decomposition logging (F14) ─────────────────
+                # Computes separate speaker grad norms for PPO (task) vs SC (rate) loss
+                # using autograd.grad with retain_graph=True before backward consumes
+                # the graph. Gated on log_grad_decomp to avoid overhead in production.
+                if self.config.log_grad_decomp and total_loss.grad_fn is not None:
+                    _sp = [p for p in self.speaker.parameters() if p.requires_grad]
+                    try:
+                        _ppo_g = torch.autograd.grad(
+                            actor_loss + critic_loss, _sp,
+                            retain_graph=True, allow_unused=True,
+                        )
+                        _ppo_norm = float(sum(
+                            g.norm() ** 2 for g in _ppo_g if g is not None
+                        ) ** 0.5)
+                        metrics["ppo_speaker_grad_norm"].append(_ppo_norm)
+                        if _sc_rate_loss_tensor is not None:
+                            _sc_g = torch.autograd.grad(
+                                _sc_rate_loss_tensor, _sp,
+                                retain_graph=True, allow_unused=True,
+                            )
+                            _sc_norm = float(sum(
+                                g.norm() ** 2 for g in _sc_g if g is not None
+                            ) ** 0.5)
+                            metrics["sc_speaker_grad_norm"].append(_sc_norm)
+                            if _sc_norm > 1e-9:
+                                metrics["ppo_sc_grad_ratio"].append(_ppo_norm / _sc_norm)
+                    except RuntimeError:
+                        pass  # graph freed early (e.g., no_grad context)
+
                 # ── Step 4: optimizer step ────────────────────────────────────────
                 speaker_grad_norm = 0.0
                 if total_loss.grad_fn is not None:
                     self.optim.zero_grad(set_to_none=True)
+                    if self.optim_delta is not None:
+                        self.optim_delta.zero_grad(set_to_none=True)
                     total_loss.backward()
-                    # Phase 2: zero gradients for listener/critic/channel so only the
-                    # speaker is updated by the entropy loss.
+                    # Phase 2: zero only channel gradients (channel params should not
+                    # change during compression).  Listener and critic keep their RL
+                    # gradients so they can adapt to the speaker's new message distribution.
+                    # Design A: δ_k frozen at Phase 2 (requires_grad already False).
                     if self._training_phase == 2:
-                        for p in (list(self.listener.parameters())
-                                  + list(self.critic.parameters())
-                                  + list(self.channel.parameters())):
+                        for p in self.channel.parameters():
                             if p.grad is not None:
                                 p.grad.zero_()
                     # Capture speaker gradient norm BEFORE clipping (raw signal strength)
@@ -409,7 +684,15 @@ class MAPPOTrainer(nn.Module):
                     ) ** 0.5)
                     nn.utils.clip_grad_norm_(self._trainable, self.config.max_grad_norm)
                     self.optim.step()
+                    if self.optim_delta is not None:
+                        self.optim_delta.step()
                 metrics["speaker_grad_norm"].append(speaker_grad_norm)
+                # P1: log per-channel δ_k values
+                if self.per_channel_delta is not None:
+                    with torch.no_grad():
+                        _dv = self.per_channel_delta.delta()
+                        for _k in range(_dv.shape[0]):
+                            metrics[f"delta_{_k}"].append(_dv[_k].item())
                 metrics["training_phase"].append(float(self._training_phase))
                 metrics["bwd_gate_active"].append(float(_bwd_gate_active))
 
@@ -462,6 +745,7 @@ class MAPPOTrainer(nn.Module):
                 metrics["shannon_gap"].append(shannon_gap)
                 metrics["bits_to_hg_ratio"].append(bits_to_hg_ratio)
                 metrics["warm_start_bits_final"].append(self._warmup_bits_final)
+                metrics["rb_task_loss"].append(_rb_task_loss)
 
                 with torch.no_grad():
                     # Per-goal bits: uses canonical source (prior-based or magnitude).
@@ -522,5 +806,47 @@ class MAPPOTrainer(nn.Module):
                             mask = mb["goal_ids"] == g_idx
                             key = f"nll_goal_{g_idx.item()}"
                             metrics[key].append(nll_per_msg[mask].mean().item())
+
+                # ── Histogram metrics (Option 1 / §15) ───────────────────────────
+                # Logged every minibatch regardless of sc_loss_active so we can
+                # monitor histogram quality even in magnitude-only mode.
+                if self.histogram is not None and m is not None:
+                    with torch.no_grad():
+                        sc_stats = histogram_rate_stats(m, self.histogram)
+                    metrics["hist_entropy_rate"].append(sc_stats["hist_entropy_rate"])
+                    metrics["hist_H_empirical"].append(sc_stats["hist_H_empirical"])
+                    metrics["hist_qphi_gap"].append(sc_stats["hist_qphi_gap"])
+
+                # ── Dither channel metrics ─────────────────────────────────────────
+                # Always logged when channel is quantised so we can track H(m|goal)
+                # even when lambda_dither=0 (Phase 1 monitoring).
+                if m is not None:
+                    with torch.no_grad():
+                        _stat_delta = (
+                            _delta.detach() if _delta is not None else self.config.delta
+                        )
+                        d_stats = dither_channel_stats(z_new, _stat_delta)
+                    metrics["H_dither_channel"].append(d_stats["H_dither_channel"])
+                    metrics["mean_frac"].append(d_stats["mean_frac"])
+
+        # ── F19: moving-target metrics (computed once per update) ─────────────
+        if self.config.log_moving_target and _speaker_params_before is not None:
+            with torch.no_grad():
+                _delta_sq = sum(
+                    (p - p0).norm() ** 2
+                    for p, p0 in zip(self.speaker.parameters(), _speaker_params_before)
+                )
+                metrics["speaker_param_delta_norm"] = [float(_delta_sq ** 0.5)]
+
+                # true H(m) from a large offline sample using correct goal distribution
+                _n = self.config.moving_target_n
+                _g_idx = np.random.choice(len(_GOAL_PROBS), size=_n, p=list(_GOAL_PROBS))
+                _goals_arr = np.array(_ENV_DEFAULT_GOALS, dtype=np.float32)[_g_idx]
+                _goals_t = torch.tensor(_goals_arr, device=self.device)
+                _z_off = self.speaker(_goals_t)
+                _, _ch_off = self.channel(_z_off)
+                _m_off = _ch_off.get("m")
+                if _m_off is not None:
+                    metrics["true_H_offline"] = [joint_entropy_bits(_m_off.long())]
 
         return {k: float(np.mean(v)) for k, v in metrics.items()}

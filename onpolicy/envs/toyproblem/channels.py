@@ -102,10 +102,12 @@ class DDCL_SD(nn.Module):
         super().__init__()
         self.delta = delta
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        d = self.delta
+    def forward(
+        self, z: torch.Tensor, delta: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict]:
+        d = delta if delta is not None else self.delta
 
-        e = (torch.rand_like(z) - 0.5) * d
+        e = (torch.rand_like(z) - 0.5) * d   # gradient path: ∂e/∂δ_k = u_k − 0.5
         z_hat = z + e
 
         with torch.no_grad():
@@ -124,9 +126,12 @@ class DDCL_SD(nn.Module):
         }
         return z_hat, info
 
-    def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
+    def comms_loss(
+        self, z: torch.Tensor, delta: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Per-element Jensen upper bound on expected bit length: log₂(|z|/δ + 1)."""
-        return torch.log2(z.abs() / self.delta + 1)
+        d = delta if delta is not None else self.delta
+        return torch.log2(z.abs() / d + 1)
 
     def transmission_bits_per_elem(
         self, z: torch.Tensor, info: dict
@@ -159,8 +164,10 @@ class DDCL_NSD(nn.Module):
         super().__init__()
         self.delta = delta
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        d = self.delta
+    def forward(
+        self, z: torch.Tensor, delta: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict]:
+        d = delta if delta is not None else self.delta
 
         u1 = (torch.rand_like(z) - 0.5) * d
         u2 = (torch.rand_like(z) - 0.5) * d
@@ -174,9 +181,12 @@ class DDCL_NSD(nn.Module):
         info = {"m": m, "nu": nu, "z_hat_true": z_hat_true}
         return z_hat, info
 
-    def comms_loss(self, z: torch.Tensor) -> torch.Tensor:
+    def comms_loss(
+        self, z: torch.Tensor, delta: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Same Jensen bound as SD — derivation carries over under NSD."""
-        return torch.log2(z.abs() / self.delta + 1)
+        d = delta if delta is not None else self.delta
+        return torch.log2(z.abs() / d + 1)
 
     def transmission_bits_per_elem(
         self, z: torch.Tensor, info: dict

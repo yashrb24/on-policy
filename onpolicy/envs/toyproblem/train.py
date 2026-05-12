@@ -165,6 +165,66 @@ def parse_args() -> argparse.Namespace:
                    help="Level 5 fix: switch to entropy-only Phase 2 when rolling SR "
                         "reaches this threshold. 0.0 = disabled.")
 
+    # P2 Option 1 — Source coding via Online Histogram + Score Function (§15)
+    p.add_argument("--use_source_coding", action="store_true",
+                   help="Enable histogram-based rate loss (Option 1 / §15 of PILLAR_P2.md). "
+                        "Replaces DLM prior with empirical frequency table + score function "
+                        "gradient. Eliminates qphi_gap bottleneck. Combine with "
+                        "--loss_comms_mode=entropy (or both) to activate compression.")
+    p.add_argument("--source_coding_smoothing", type=float, default=0.5,
+                   help="Laplace smoothing α for histogram (Jeffreys prior default: 0.5). "
+                        "Prevents zero-probability bins for unseen messages.")
+    p.add_argument("--lambda_dither", type=float, default=0.0,
+                   help="Weight for Phase 2 dither entropy loss L_dither. "
+                        "Pushes frac(z_k/δ) toward 0.5 (bin centres), reducing H(m|goal). "
+                        "For the floor SD channel, frac=0.5 is zero-noise; frac=0 is max noise. "
+                        "Only applied when training_phase==2 (after phase1_sr_threshold reached). "
+                        "0.0 = disabled (default).")
+
+    # P1 — Per-channel learnable δ_k
+    p.add_argument("--learn_delta", action="store_true",
+                   help="P1: replace global scalar δ with per-channel learned widths "
+                        "δ_k = softplus(α_k). Only active for --channel sd or nsd. "
+                        "Initialised at --delta. Design A: δ_k frozen at Phase 2 onset.")
+    p.add_argument("--learn_global_delta", action="store_true",
+                   help="E53: learn a single global δ (1 param, broadcasts over all dims). "
+                        "Mutually exclusive with --learn_delta. Useful as ablation baseline "
+                        "for per-channel δ (--learn_delta).")
+    p.add_argument("--lr_delta", type=float, default=1e-4,
+                   help="P1: Adam LR for α_k (per-channel δ parameters). "
+                        "Default 1e-4 (3× slower than speaker LR 3e-4).")
+    p.add_argument("--heuristic_delta", action="store_true",
+                   help="E56: at Phase 2 onset, set δ_k ∝ 1/H(m_k) from empirical "
+                        "histogram, then freeze. Baseline comparison for --learn_delta. "
+                        "No optimizer. Requires --use_source_coding and a phase threshold.")
+
+    # P4 — Rao-Blackwell gradient estimator
+    p.add_argument("--use_rb_gradient", action="store_true",
+                   help="P4: replace STE speaker task gradient with RB finite-difference "
+                        "estimator g_RB_k = (L(ẑ_hi) - L(ẑ_lo)) / δ_k. Active in Phase 1 "
+                        "only. Adds 2 extra listener forward passes per minibatch (joint mode).")
+    p.add_argument("--rb_mode", type=str, default="joint", choices=["joint", "per_dim"],
+                   help="P4: RB approximation mode. 'joint' (default): all dims move to lo/hi "
+                        "simultaneously (2 passes, approximate). 'per_dim': exact per-dimension "
+                        "RB (2*z_dim passes, unbiased but expensive).")
+
+    # P3 — Deployment evaluation
+    p.add_argument("--deploy_eval", action="store_true",
+                   help="P3: route listener input through the actual quantised z_hat "
+                        "(z_hat_deploy for SD, z_hat_true for NSD) instead of the STE "
+                        "z_hat used during training. Measures deployment consistency gap.")
+
+    p.add_argument("--log_grad_decomp", action="store_true",
+                   help="F14: log PPO vs SC speaker grad norms per minibatch. "
+                        "Adds compute overhead (two extra autograd.grad calls). "
+                        "Enable only for diagnostic runs (e.g. live_B / E21 re-run).")
+    p.add_argument("--log_moving_target", action="store_true",
+                   help="F19: log speaker param delta norm and offline H(m) per update. "
+                        "Offline sample uses --moving_target_n goals drawn from the "
+                        "true goal distribution. Adds a full speaker forward pass per update.")
+    p.add_argument("--moving_target_n", type=int, default=10_000,
+                   help="F19: number of offline messages for true H(m) estimate (default: 10000).")
+
     # Logging
     p.add_argument("--log_dir", type=str, default="runs",
                    help="Root log directory. Actual path: <log_dir>/<exp_name>/<seed>/")
@@ -224,10 +284,20 @@ def _build_csv_header(z_dim: int) -> list[str]:
         "entropy_loss_magnitude", "speaker_grad_norm",
         "warm_start_bits_final",
         "training_phase", "bwd_gate_active",
+        # Option 1 — histogram + dither metrics (NaN when disabled)
+        "hist_entropy_rate", "hist_H_empirical", "hist_qphi_gap", "sc_rate_loss",
+        "dither_loss", "H_dither_channel", "mean_frac",
+        # F14 — gradient decomposition (NaN when log_grad_decomp=False)
+        "ppo_speaker_grad_norm", "sc_speaker_grad_norm", "ppo_sc_grad_ratio",
+        # F19 — moving-target diagnostics (NaN when log_moving_target=False)
+        "speaker_param_delta_norm", "true_H_offline",
+        # P4 — Rao-Blackwell gradient (0.0 when use_rb_gradient=False)
+        "rb_task_loss",
     ]
     p2_per_dim = [f"H_dim_{k}" for k in range(z_dim)]
     p2_per_goal = [f"nll_goal_{i}" for i in range(_N_GOALS)]
-    return base + per_goal_bits + p2_base + p2_per_dim + p2_per_goal
+    p1_delta = [f"delta_{k}" for k in range(z_dim)]
+    return base + per_goal_bits + p2_base + p2_per_dim + p2_per_goal + p1_delta
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +349,19 @@ def main() -> None:
             use_ema_prior=args.use_ema_prior,
             ema_prior_momentum=args.ema_prior_momentum,
             phase1_sr_threshold=args.phase1_sr_threshold,
+            use_source_coding=args.use_source_coding,
+            source_coding_smoothing=args.source_coding_smoothing,
+            lambda_dither=args.lambda_dither,
+            log_grad_decomp=args.log_grad_decomp,
+            log_moving_target=args.log_moving_target,
+            moving_target_n=args.moving_target_n,
+            learn_delta=args.learn_delta,
+            learn_global_delta=args.learn_global_delta,
+            lr_delta=args.lr_delta,
+            heuristic_delta=args.heuristic_delta,
+            use_rb_gradient=args.use_rb_gradient,
+            rb_mode=args.rb_mode,
+            deploy_eval=args.deploy_eval,
         )
         trainer = MAPPOTrainer(config, device=device)
         buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
@@ -399,6 +482,23 @@ def main() -> None:
                 metrics.get("warm_start_bits_final", float("nan")),
                 metrics.get("training_phase", float("nan")),
                 metrics.get("bwd_gate_active", float("nan")),
+                # Option 1 — histogram metrics
+                metrics.get("hist_entropy_rate", float("nan")),
+                metrics.get("hist_H_empirical", float("nan")),
+                metrics.get("hist_qphi_gap", float("nan")),
+                metrics.get("sc_rate_loss", float("nan")),
+                metrics.get("dither_loss", float("nan")),
+                metrics.get("H_dither_channel", float("nan")),
+                metrics.get("mean_frac", float("nan")),
+                # F14 — gradient decomposition
+                metrics.get("ppo_speaker_grad_norm", float("nan")),
+                metrics.get("sc_speaker_grad_norm", float("nan")),
+                metrics.get("ppo_sc_grad_ratio", float("nan")),
+                # F19 — moving-target diagnostics
+                metrics.get("speaker_param_delta_norm", float("nan")),
+                metrics.get("true_H_offline", float("nan")),
+                # P4 — Rao-Blackwell gradient
+                metrics.get("rb_task_loss", float("nan")),
             ]
             p2_dim_vals = [
                 metrics.get(f"H_dim_{k}", float("nan")) for k in range(args.z_dim)
@@ -406,6 +506,9 @@ def main() -> None:
             p2_goal_vals = [
                 metrics.get(f"nll_goal_{i}", float("nan"))
                 for i in range(_N_GOALS)
+            ]
+            p1_delta_vals = [
+                metrics.get(f"delta_{k}", float("nan")) for k in range(args.z_dim)
             ]
             csv_writer.writerow([
                 update, timestep, mean_reward, success_rate,
@@ -416,7 +519,7 @@ def main() -> None:
                 metrics["z_norm"], sps,
                 metrics.get("shannon_gap", float("nan")),
                 metrics.get("bits_to_hg_ratio", float("nan")),
-            ] + per_goal_bits + p2_base_vals + p2_dim_vals + p2_goal_vals)
+            ] + per_goal_bits + p2_base_vals + p2_dim_vals + p2_goal_vals + p1_delta_vals)
             csv_file.flush()
 
             if update % args.log_every == 0 or update == n_updates - 1:

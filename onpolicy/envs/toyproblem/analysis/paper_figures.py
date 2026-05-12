@@ -1581,7 +1581,7 @@ def generate_sweep_figures(
     df: pd.DataFrame,
     summary: pd.DataFrame,
     agg: pd.DataFrame,
-    out_dir: str | Path = "results/toyproblem/sweep_stage_a/figures",
+    out_dir: str | Path = "results/figures",
 ) -> None:
     """Generate all main paper + appendix figures for the Stage A sweep.
 

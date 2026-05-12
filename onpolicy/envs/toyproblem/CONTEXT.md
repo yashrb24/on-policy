@@ -12,7 +12,7 @@ Every session must follow these rules — no exceptions.
 |-------|---------------|
 | Bug found or fixed | `docs/ISSUES_TRACKER.md` — add entry before fixing |
 | Code file created or changed | `PLAN.md` — mark task done; update phase status if phase completes |
-| New sweep results generated | Re-run `report_baseline.py`; replace `results/toyproblem/<sweep>/` |
+| New sweep results generated | Re-run `report_baseline.py --out_dir results`; figures land in `results/figures/` |
 | Experiment procedure changes | `docs/README.md §5` |
 | Mathematical finding or correction | `docs/MATH.md` |
 | Statistical method added or changed | `docs/STATS.md` |
@@ -39,25 +39,25 @@ Rigorous testbed for DDCL (Differentiable Discrete Communication Learning) on a 
 
 ## Current State
 
-**Phase:** 2 → 3 transition — Stage A sweep complete; baseline frozen; P2 fix ladder implemented and tested  
+**Phase:** 2 → 3 transition — Stage A sweep complete; baseline frozen; P2 Option 1 empirically tested, two-phase fix identified  
 **Running:** Nothing.  
-**P2 status:** Fix ladder complete (143 tests, 0 failures). CODE-010/011 fixed (qphi_gap units, nll_goal naming). Backward loss scale fixed (sum → joint NLL). Level 1/3/5 implemented. See PILLAR_P2.md §13.  
-**P2-A result (pre-fix):** All P2 configs worse than baseline (baseline shannon_gap=2.48, best P2=2.90). Three root causes: q_φ poorly fitted (qphi_gap 2–6 bits vs floor 0.54), λ too small (entropy 1.5% of speaker gradient), circular gradient attenuation.  
+**P2 status:** Fix ladder complete (143 tests). Option 1 implemented + empirically tested (sc_option1, 2M steps). Histogram fitting confirmed (gap=0.004 bits). Standalone entropy mode FAILED: H(m) barely changed (7.7→7.1 bits), z_norm grew 11→216, true_bits exploded to 19.5. Root causes: score function ≈100× weaker than RL; removing magnitude penalty allowed unbounded z growth. Fix: two-phase training (Phase 1 RL+magnitude → SR=1; Phase 2 score function only). §15.10 documents findings and next experiment.  
+**P2-A result (pre-fix):** All P2 configs worse than baseline (baseline shannon_gap=2.48, best P2=2.90). Three root causes: q_φ poorly fitted, λ too small, circular gradient attenuation.  
 **Baseline:** FROZEN — `configs/baseline_best.yaml`: channel=sd, delta=1.0, lambda_comms=5e-4, z_dim=2. SR=1.000±0.000; true_bits=4.75.  
-**Immediate next action:** Run P2-FIX sweep (25 runs × 5 seeds):
+**Immediate next action:** Two-phase experiment with score function in Phase 2 (see PILLAR_P2.md §15.10.4):
 ```bash
-nohup bash -c 'KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
-    python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \
-    --stage P2-FIX --seeds 0 1 2 3 4 \
-    --log_dir runs/toyproblem/p2_fix \
-    --best_K 5 --best_model_type factored \
-    --phase2_lambda 5e-4 --phase2_delta 1.0 --phase2_z_dim 2' \
-    > /tmp/p2_fix.log 2>&1 &
+KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
+    python -m onpolicy.envs.toyproblem.train \
+    --exp_name sc_twophase --seed 0 \
+    --channel sd --delta 1.0 --lambda_comms 5e-4 \
+    --loss_comms_mode both --use_source_coding \
+    --phase1_sr_threshold 0.99 \
+    --total_timesteps 3000000 --n_envs 16 --n_steps 256
 ```
 
 **Directory layout (canonical, from repo root):**
 - Raw runs: `runs/toyproblem/<experiment>/` (gitignored)
-- Analysis output: `results/toyproblem/<experiment>/` (gitignored)
+- Analysis output: `results/` (gitignored) — figures in `results/figures/`, aggregated CSVs in `results/aggregated/`, post_hoc JSONs in `results/post_hoc/`
 - Committed docs: `onpolicy/envs/toyproblem/docs/` (no data here)
 
 **Check sweep:** `ps aux | grep run_sweep | grep -v grep`  
@@ -83,6 +83,8 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
 ## Session Log
 
 *Keep entries concise. One paragraph per session maximum.*
+
+**Session 18 (2026-04-30):** Implemented Option 1 — Online Histogram + Score Function rate loss (§15 of PILLAR_P2.md). Ran sc_option1 (2M steps, seed 0). Key findings: histogram fitting is solved (gap=0.004 bits throughout); but H(m) barely compressed (7.7→7.1 bits), true_bits exploded 6.8→19.5, z_norm grew 11→216. Root causes: (1) score function gradient ≈100× weaker than RL at λ=5e-4 — EM M-step competition means RL dominates; (2) mode=entropy removed magnitude penalty, allowing unbounded z growth with negative sc_rate_loss feedback loop. Score function is locally correct but cannot achieve global bin consolidation against dominant RL gradient. Fix: two-phase training — Phase 1 uses magnitude+score_function (magnitude anchors z_norm), Phase 2 (triggered at SR=0.99) uses score function only with no RL competition. Added §15.9 (training vs deployment compression distinction) and §15.10 (sc_option1 empirical findings, failure diagnosis, two-phase fix) to PILLAR_P2.md. Root cause of fix-ladder failure confirmed: DLM qphi_gap 12–14 bits is irrecoverable with the parametric approach. Solution: (1) `source_coding.py` (new, 230 lines) — `MessageHistogram` class (per-dimension count dicts, Laplace-α=0.5 smoothing, `update`/`rate`/`empirical_entropy` methods) and `source_coding_rate_loss` (score function proxy: gradient = λ·(R_hi−R_lo)/δ, detached from histogram) and `histogram_rate_stats` diagnostic function. (2) `trainer.py` — two new `MAPPOConfig` fields (`use_source_coding`, `source_coding_smoothing`); `self.histogram` init; E-step (histogram reset + no_grad forward pass over full rollout) inserted before PPO epoch loop; M-step loss (`source_coding_rate_loss`) added to `total_loss` inside PPO loop; `hist_entropy_rate`, `hist_H_empirical`, `hist_qphi_gap`, `sc_rate_loss` metrics added. (3) `train.py` — `--use_source_coding`, `--source_coding_smoothing` CLI flags; 4 new CSV columns. (4) `tests/test_source_coding.py` — 22 tests covering rate properties, gradient correctness (T7 verifies ∂L/∂z_k = λ·(R_hi−R_lo)/δ analytically), zero-lambda, qphi_gap convergence, and full trainer integration (T10–12). All 165 tests pass (143 pre-existing + 22 new). Smoke run: hist_qphi_gap = 0.004 bits (DLM failure was 12–14 bits — 3000× improvement). PILLAR_P2.md §15.5 status and header updated.
 
 **Session 17 (2026-04-28):** Implemented full P2 fix ladder (Levels 1–5). (1) Level 1 — conditional backward gate: `qphi_bwd_gate_threshold` config field + gate check after q_phi Step 1 in trainer.py; backward only fires when qphi_gap ≤ threshold. (2) Level 3 — EMA prior: `use_ema_prior` + `ema_prior_momentum` config fields; `_ema_entropy_model` shadow created at init, updated via `_update_ema_prior()` after each q_phi step; EMA model used for backward loss in place of live q_phi. (3) Level 5 — two-phase training: `phase1_sr_threshold` config field; `notify_success_rate()` method in trainer triggers `_training_phase = 2` on first SR crossing; Phase 2 zero-grads listener/critic/channel before optimizer step. (4) Also fixed backward loss dimensional bug: changed `nll_bwd.mean()` → `nll_bwd.sum(dim=-1).mean()` for consistent λ scale across z_dims; same fix for `entropy_loss_magnitude` metric. (5) Added `training_phase` and `bwd_gate_active` CSV columns. (6) Added P2-FIX stage to `run_p2_ablation.py` (25 runs: 5 configs × 5 seeds). (7) Added §13 "Fix Ladder" to PILLAR_P2.md. (8) 16 new TestFixLadder tests — 143 total, 0 failures.  
 **Immediate next action:** Run P2-FIX sweep to validate the fix ladder empirically.

@@ -16,18 +16,18 @@ Usage (from repo root):
     # Stage P2-A (model selection):
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
         python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
-        --stage P2-A --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation
+        --stage P2-A --seeds 0 1 2 3 4 --log_dir runs/p2_ablation
 
     # Stage P2-B (after inspecting P2-A results):
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
         python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
-        --stage P2-B --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation \\
+        --stage P2-B --seeds 0 1 2 3 4 --log_dir runs/p2_ablation \\
         --best_K 5 --best_model_type factored --best_context A --best_loss_mode entropy
 
     # Stages P2-C through P2-F (after P2-B results):
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \\
         python -m onpolicy.envs.toyproblem.experiments.run_p2_ablation \\
-        --stage P2-C --seeds 0 1 2 3 4 --log_dir runs/toyproblem/p2_ablation \\
+        --stage P2-C --seeds 0 1 2 3 4 --log_dir runs/p2_ablation \\
         --best_K 5 --best_model_type factored --best_context A \\
         --best_loss_mode entropy --best_lambda 4e-3
 
@@ -36,7 +36,7 @@ Usage (from repo root):
 
 Analysis after each stage:
     from onpolicy.envs.toyproblem.analysis.load_runs import load_sweep, final_metrics, seed_aggregate
-    df = load_sweep("runs/toyproblem/p2_ablation")
+    df = load_sweep("runs/p2_ablation")
     summary = final_metrics(df)
     # group by exp_name to compare conditions within each stage
 """
@@ -312,7 +312,7 @@ def main() -> None:
                    choices=list(_STAGE_FNS.keys()) + ["all"],
                    required=True, help="Which stage to run.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    p.add_argument("--log_dir", type=str, default="runs/toyproblem/p2_ablation")
+    p.add_argument("--log_dir", type=str, default="runs/p2_ablation")
     p.add_argument("--dry_run", action="store_true",
                    help="Print run list without executing.")
     # Phase 2 winners (defaults are sensible placeholders; update after Phase 2)

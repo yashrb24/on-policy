@@ -72,6 +72,34 @@ class SpeakerNetwork(nn.Module):
         return self.network(x)
 
 
+class PerChannelDelta(nn.Module):
+    """Per-channel learnable quantisation widths δ_k = softplus(α_k).
+
+    Pillar 1: replaces the global scalar δ with z_dim independent widths,
+    allowing each dimension to independently adapt its bin coarseness.
+    Initialised so δ_k = delta_init for all k (matching the global-δ baseline).
+    """
+
+    def __init__(
+        self,
+        z_dim: int,
+        delta_init: float = 1.0,
+        delta_min: float = 0.1,
+        delta_max: float = 10.0,
+    ) -> None:
+        super().__init__()
+        self.delta_min = delta_min
+        self.delta_max = delta_max
+        # softplus_inv(delta_init) = log(exp(delta_init) - 1)
+        init_val = math.log(math.exp(delta_init) - 1.0)
+        self.log_alpha = nn.Parameter(torch.full((z_dim,), init_val))
+
+    def delta(self) -> torch.Tensor:
+        """δ_k = softplus(α_k) clamped to [delta_min, delta_max]."""
+        import torch.nn.functional as F
+        return F.softplus(self.log_alpha).clamp(self.delta_min, self.delta_max)
+
+
 class ListenerActor(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, hidden: int = 16) -> None:
         super().__init__()

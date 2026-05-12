@@ -1113,8 +1113,14 @@ class TestFixLadder:
         metrics = t.update(self._buf())
         assert metrics.get("training_phase") == 2.0
 
-    def test_phase2_zeros_non_speaker_grads(self):
-        """In Phase 2 only the speaker should be updated; listener/critic/channel frozen."""
+    def test_phase2_listener_keeps_adapting(self):
+        """In Phase 2 the listener and critic should keep updating via RL losses.
+
+        E39 fix: listener must adapt to the speaker's shifting z distribution as
+        the dither loss pushes frac toward 0.5. Freezing the listener caused SR
+        degradation in E12-E14 because the listener couldn't decode the new messages.
+        Channel parameters are the only ones that should be frozen in Phase 2.
+        """
         t = MAPPOTrainer(
             self._base_cfg(phase1_sr_threshold=0.0001),  # switch immediately
             device=torch.device("cpu"),
@@ -1127,9 +1133,9 @@ class TestFixLadder:
         w_listener_after = t.listener.logits.weight.data
         w_critic_after = t.critic.network[-1].weight.data
 
-        assert torch.allclose(w_listener_before, w_listener_after, atol=1e-6), (
-            "Listener should not update in Phase 2"
+        assert not torch.allclose(w_listener_before, w_listener_after, atol=1e-6), (
+            "Listener should update in Phase 2 (E39 fix: listener adapts via RL)"
         )
-        assert torch.allclose(w_critic_before, w_critic_after, atol=1e-6), (
-            "Critic should not update in Phase 2"
+        assert not torch.allclose(w_critic_before, w_critic_after, atol=1e-6), (
+            "Critic should update in Phase 2 (E39 fix: critic adapts via RL)"
         )
