@@ -544,3 +544,34 @@ by the dither formula error; will be re-checked after E42–E43 complete.
 **OQ5 (CLOSED 2026-05-06):** Secondary bin selection fixed in `source_coding_rate_loss`.
 For frac < 0.5, secondary bin is now `m_base − 1` (not `m_base + 1`). No re-runs needed —
 gradient direction was already correct; only magnitude was biased.
+
+---
+
+## Open questions — Pillars P1, P4, P3, ALL (as of 2026-05-12)
+
+These questions will be resolved as E53–E65 complete and post-hoc analysis runs.
+
+**OQ6 (OPEN):** Does learned per-channel δ (E54) differentiate across dimensions?
+- Expected: δ_k values diverge across dimensions, reflecting unequal H(m_k) from Phase 1.
+- Falsification: all δ_k converge to the same value as global δ (E53). This would mean
+  the optimizer finds no signal to allocate bits asymmetrically.
+- Resolves to: C17. Data: post_hoc on E53/E54 checkpoints.
+
+**OQ7 (OPEN):** Does the Rao-Blackwell gradient (E58) reach SR=0.99 in fewer updates
+than the STE baseline (E57)?
+- Expected: RB-joint reduces variance on the speaker task gradient → faster Phase 1.
+- Falsification: no statistically significant difference in steps-to-SR99. SR=0.99 may
+  be achieved through the listener without requiring a good speaker task gradient.
+- Resolves to: C18. Data: metrics.csv column `training_phase` transition timestamps.
+
+**OQ8 (OPEN, conditional):** Do P1 and P4 interact non-additively?
+- Run E61 (RB-joint + per-channel δ) only if OQ6 and OQ7 both show positive results.
+  If effects are independent, E64/E65 can use the best single-pillar configs directly.
+- Resolves to: C19 (if E61 runs). Data: E54, E58, E61 H_joint comparison.
+
+**OQ9 (OPEN):** Do all four pillars compose additively (or super-additively) to achieve
+H_joint below any single-pillar result?
+- Expected: E64/E65 H_joint < E55 (P1+P2), E60 (P4+P2). SR ≥ 0.99.
+- Falsification: H_joint(E64) > H_joint(E52 or E60). This would indicate destructive
+  interference and must be reported even if it falsifies the paper's headline claim.
+- Resolves to: C20. Data: post_hoc on E64/E65. Gate: OQ6+OQ7 both resolved.

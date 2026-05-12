@@ -950,3 +950,115 @@ for monotone rate functions, but magnitude is wrong. Needs separate investigatio
 
 **Next steps:** Re-run E42–E46 with corrected loss. Run post_hoc on E42–E43 to verify
 residuals < 0.3 bits and H(m|goal) → 0.
+
+---
+
+## 2026-05-12 — Pillar design docs; P1 experiments complete; P4 running; git setup
+
+**Context:** With Pillar 2 closed (E01–E52 done, C1–C16 written), the session focused on
+designing and launching the remaining three pillars (P1, P4, P3) and their integration
+(ALL_PILLARS), followed by repository housekeeping before paper writing begins.
+
+---
+
+### Pillar design docs created
+
+All four v2 pillar docs written and committed to `feat/ToyProblem` (merged into
+`Dev_ToyProblem` on 2026-05-12):
+
+| Doc | Coverage |
+|---|---|
+| `docs/pillars/PILLAR_P1_v2.md` | Per-channel δ — design, E53–E56 configs, hypotheses, cross-pillar interactions |
+| `docs/pillars/PILLAR_P2_v2.md` | Phase 2 dither — updated §17 results, E44–E52 complete |
+| `docs/pillars/PILLAR_P3_v2.md` | NSD deployment consistency — TPDF theory, eval_deploy design |
+| `docs/pillars/PILLAR_P4_v2.md` | Rao-Blackwell gradient — RB formula derivation, E57–E61 plan |
+| `docs/pillars/PILLAR_ALL_v2.md` | All-Pillars integration — SD (E64) and NSD (E65) variants, gate conditions |
+
+v1 stubs (PILLAR_P1.md, PILLAR_P2.md, PILLAR_P3.md, PILLAR_P4.md) deleted.
+
+---
+
+### LARGE_SCALE_EXTENSION.md created
+
+`docs/LARGE_SCALE_EXTENSION.md` maps each toy-problem design decision to its scale
+assumption. The document distinguishes:
+- **Assumptions that hold at scale:** Schuchman/NSD theorems (channel-level, independent
+  of task structure), dither loss formula, histogram estimator mechanics.
+- **Assumptions that break at scale:** Role separation (at scale each agent both sends
+  and receives using shared parameters θ), gradient isolation (RB detach trick severs
+  inter-agent credit assignment), Phase 2 gradient zeroing (impossible with shared params).
+
+**Key section added after user feedback (§0.5 Role-Collapse Problem):** At scale, each
+agent has one shared policy θ — there is no separate speaker θ_S and listener θ_L. This
+has four consequences documented in §0.5.3:
+- (A) Comms loss bleeds into action head via shared parameters
+- (B) RB detach trick breaks inter-agent credit assignment
+- (C) Phase 2 gradient zeroing impossible
+- (D) N(N-1) gradient paths amplify but entangle the message encoder
+
+Alternatives proposed: critic-based RB (V(s) instead of π for probe), additive RB proxy
+(alongside PPO, not replacing STE), λ_rl < 1 in Phase 2 instead of gradient zeroing.
+
+---
+
+### E53–E56 launched and completed (P1_DELTA stage)
+
+All 20 P1 runs (4 configs × 5 seeds) completed with exit=0:
+
+| Experiment | Config | Seeds done |
+|---|---|---|
+| E53 | `p1_global_delta` — global δ, STE, Phase 1+2 | 5/5 |
+| E54 | `p1_perchannel_delta` — learned per-channel δ | 5/5 |
+| E55 | `p1_perchannel_p2_5e-3` — per-channel δ + Phase 2 | 5/5 |
+| E56 | `p1_heuristic_delta` — heuristic δ ∝ 1/H(m_k), frozen at Phase 2 onset | 5/5 |
+
+Post-hoc coding and aggregate_results.py not yet run — H_joint and per-dim δ_k values
+for E53–E56 are pending.
+
+---
+
+### E57–E60 launched (P4_RB stage, partially complete)
+
+15 P4 runs (3 configs × 5 seeds). Status at end of session:
+
+| Experiment | Config | Seeds done |
+|---|---|---|
+| E57 | `p4_ste_baseline` — STE, no RB | 4/5 |
+| E58 | `p4_rb_joint` — RB-joint mode | 0/5 (running) |
+| E60 | `p4_rb_joint_p2_5e-3` — RB-joint + Phase 2 | 0/5 (queued) |
+
+Launcher re-started on 2026-05-12; dry-run detects completed seeds automatically.
+E59 (p4_rb_per_dim) not yet in runner — requires `rb_mode="per_dim"` support to be
+verified and added separately.
+
+---
+
+### Repository and git housekeeping
+
+- Branch incident: user switched from `feat/ToyProblem` to `Dev_ToyProblem`, reverting
+  all uncommitted changes. Recovery: `git merge feat/ToyProblem` restored all 50 changed
+  files (17,397 insertions) via a clean merge commit (`b96aa61`).
+- `.gitignore` corrected: removed `*.md`, `*.csv`, `*.pdf`, `*.txt` (too broad); added
+  `*.pt`, `*.pth`, `scripts/pillar_experiments_*.log`; added `**/results/` to exclude
+  all generated outputs. Repo now tracks only source code and markdown docs.
+- Previously tracked data files (`results/figures/*.pdf`, `results/post_hoc/*.json`,
+  `results/aggregated/summary.csv`) removed from git index via `git rm --cached`.
+
+---
+
+### Open threads (as of 2026-05-12)
+
+| Thread | Priority | Status | Blocking |
+|---|---|---|---|
+| E57 seed 4 completion | High | Running | P4 validation |
+| E58 (p4_rb_joint) 5 seeds | High | Running | P4 primary claim |
+| E60 (p4_rb_joint_p2_5e-3) 5 seeds | High | Queued | P4+P2 combo |
+| post_hoc_coding.py on E53–E60 | High | PENDING (after runs finish) | P1+P4 conclusions |
+| aggregate_results.py on E53–E60 | High | PENDING | summary.csv update |
+| P1 conclusion (C17): does δ_k differentiate? | Medium | PENDING post_hoc | Informs E64/E65 config |
+| P4 conclusion (C18): RB vs STE speed? | Medium | PENDING E58 done | Informs E64/E65 config |
+| eval_deploy.py for P3 (E62/E63) | Medium | NOT STARTED | E62/E63, F29 |
+| E59 (p4_rb_per_dim) add to runner | Low | PLANNED | completeness |
+| E61 (p4_rb_p1_joint) conditional run | Low | PLANNED | P1×P4 interaction |
+| ALL_PILLARS (E64/E65) | Low | BLOCKED on P1+P4 gate | headline claim |
+| Paper §3 Method + §4 Toy (E01–E52) | Medium | Ready to start | — |

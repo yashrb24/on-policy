@@ -293,6 +293,85 @@ at any λ tested; Phase 2 is more robust than anticipated. See C10 for full tabl
 
 ---
 
+## Group 11 — Pillar 1: Per-Channel δ (E53–E56)
+
+**Purpose:** Test whether letting each message dimension k learn its own quantisation
+step δ_k (via softplus(α_k)) allows asymmetric bit allocation across dimensions.
+E56 provides a heuristic baseline (δ_k ∝ 1/H(m_k), set at Phase 2 onset, then frozen).
+
+Post-hoc coding must be run on all checkpoints after training to measure per-dim H(m_k)
+and whether δ_k values differentiate across dimensions.
+
+| ID | Experiment | Status | Seeds | Figures | Invalidates if re-run |
+|---|---|---|---|---|---|
+| E53 | `p1_global_delta` | DONE (2026-05-12) | 5 | F22–F24 | summary.csv, F22–F24 |
+| E54 | `p1_perchannel_delta` | DONE (2026-05-12) | 5 | F22–F24 | summary.csv, F22–F24 |
+| E55 | `p1_perchannel_p2_5e-3` | DONE (2026-05-12) | 5 | F22–F24 | summary.csv, F22–F24 |
+| E56 | `p1_heuristic_delta` | DONE (2026-05-12) | 5 | F22–F24 | summary.csv, F22–F24 |
+
+**Primary comparison:** E54 (learned) vs E53 (global δ) on H_joint and per-dim δ_k spread.
+**Baseline:** E56 (heuristic) is not a paper contribution — it contextualises how much
+the optimizer does vs a rule-based assignment.
+**Post-hoc pending:** aggregate_results.py and post_hoc_coding.py on all E53–E56 checkpoints.
+
+---
+
+## Group 12 — Pillar 4: Rao-Blackwell Gradient (E57–E61)
+
+**Purpose:** Test whether replacing the straight-through estimator (STE) speaker task
+gradient with the Rao-Blackwell finite-difference (g_RB_k = [L_hi − L_lo] / δ_k)
+speeds Phase 1 convergence and/or improves final H_joint.
+
+| ID | Experiment | Status | Seeds | Figures | Invalidates if re-run |
+|---|---|---|---|---|---|
+| E57 | `p4_ste_baseline` | PENDING (4/5 done) | 5 | F26–F28 | summary.csv, F26–F28 |
+| E58 | `p4_rb_joint` | PENDING (running) | 5 | F26–F28 | summary.csv, F26–F28 |
+| E59 | `p4_rb_per_dim` | PLANNED | 5 | F26–F28 | summary.csv, F26–F28 |
+| E60 | `p4_rb_joint_p2_5e-3` | PENDING (running) | 5 | F28 | summary.csv, F28 |
+| E61 | `p4_rb_p1_joint` | PLANNED (conditional) | 5 | F28 | summary.csv, F28 |
+
+**Primary comparison:** E58 (RB-joint) vs E57 (STE) on steps-to-SR99.
+**Conditional:** E61 (RB + per-channel δ) only if P1×P4 interaction is non-additive.
+**E59** (per-dim RB mode) not yet added to runner; requires `rb_mode="per_dim"` support.
+
+---
+
+## Group 13 — Pillar 3: NSD Deployment Consistency (E62–E63)
+
+**Purpose:** Measure the train/deploy SR gap for the SD and NSD channels.
+NSD (TPDF dither) should have zero deploy gap by construction (Schuchman theorem).
+SD has distributional consistency but not sample consistency.
+
+Requires `eval_deploy.py` (checkpoint evaluation script, not yet implemented).
+
+| ID | Experiment | Status | Seeds | Figures | Invalidates if re-run |
+|---|---|---|---|---|---|
+| E62 | `p3_sd_deploy_eval` | PLANNED | 5 | F29 | F29 |
+| E63 | `p3_nsd_deploy_eval` | PLANNED | 5 | F29 | F29 |
+
+**Blocked on:** `eval_deploy.py` implementation. Uses E09 (SD) and E47 (NSD) checkpoints;
+no new training runs required. The deploy eval replaces dither with its expected value
+(zero for SD; zero for NSD) and measures SR degradation.
+
+---
+
+## Group 14 — ALL_PILLARS: Full Integration (E64–E65)
+
+**Purpose:** Combine all four pillars (P1+P2+P4+P3) to test whether benefits compose.
+This is the headline experimental claim of the paper.
+
+| ID | Experiment | Status | Seeds | Figures | Invalidates if re-run |
+|---|---|---|---|---|---|
+| E64 | `all_pillars_sd` | BLOCKED | 5 | F-ALL | summary.csv, F-ALL |
+| E65 | `all_pillars_nsd` | BLOCKED | 5 | F-ALL | summary.csv, F-ALL |
+
+**Gate:** Do not run until E53+E54 validated (P1 conclusion) AND E57+E58 validated
+(P4 conclusion). Override with `--override_gate` flag once gate passes.
+**Config:** P1 (learn_delta) + P2 (use_source_coding, lambda_dither=5e-3) +
+P4 (use_rb_gradient, rb_mode=joint) + P3 (channel=sd or nsd).
+
+---
+
 ## Dependency graph (which analyses must be re-run after each experiment)
 
 ```
