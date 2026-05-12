@@ -73,8 +73,6 @@ class CommunicatingGoalEnv(gym.Env):
 
     def seed(self, seed=None) -> list[int | None]:
         self.np_random = np.random.RandomState(seed)
-        if seed is not None:
-            np.random.seed(seed)
         return [seed]
 
     def _rng(self):

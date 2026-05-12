@@ -2,9 +2,51 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Categorical
+
+# ---------------------------------------------------------------------------
+# Mixture-prior constants — shared by all entropy model classes
+# ---------------------------------------------------------------------------
+# All DLM entropy models mix their learned q_φ with a fixed broad Laplace
+# component to guarantee non-zero probability everywhere on ℤ (and on ℝ for
+# the continuous Ballé backward evaluation).
+#
+# Guarantee: q̃_φ(x) ≥ _FLAT_ALPHA · Laplace(x; 0, _FLAT_SCALE) > 0  ∀ x
+#
+# This eliminates the gradient dead-zone that occurs when q_φ has never seen
+# a particular message value: instead of hitting the 1e-10 clamp and getting
+# zero gradient, the flat component provides a finite, direction-correct signal
+# (Laplace gradient = sign(x)/_FLAT_SCALE, always pointing toward smaller |x|).
+# Warm-start is therefore a useful acceleration aid but NOT required for safety.
+#
+# Cost: at most −log₂(_FLAT_ALPHA) ≈ 6.6 bits added to worst-case NLL; in
+# practice the learned q_φ dominates (ratio ≈ 99:1) after a few gradient steps.
+# See docs/pillars/PILLAR_P2.md §4 and docs/MATH.md §12 for derivation.
+_FLAT_ALPHA: float = 0.01    # weight of fixed flat component in mixture
+_FLAT_SCALE: float = 50.0    # Laplace scale (covers ±150 integers at 1% of peak)
+# Minimum DLM scale. s=0.5 would cap per-component probability at ~0.46 (P=σ(1)−σ(−1)),
+# preventing joint models from learning sharp conditionals (breaks V4).
+# s=0.1 allows P≈0.987 (P=σ(5)−σ(−5)) while remaining numerically stable — values
+# 5+ bins away from a component still get a non-zero gradient via the flat floor.
+_S_LOG_MIN: float = math.log(0.1)
+
+
+def _mix_with_flat(log_q_learned: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Mix learned DLM log-prob with a fixed broad Laplace floor.
+
+    log q̃_φ(x) = log[(1−α)·q_φ(x) + α·Laplace(x; 0, _FLAT_SCALE)]
+
+    Applied per-element; x and log_q_learned must have the same shape.
+    Works for both integer m (forward loss) and continuous z/δ (backward loss).
+    """
+    log_q_flat = -x.abs() / _FLAT_SCALE - math.log(2.0 * _FLAT_SCALE)
+    return torch.logaddexp(
+        log_q_learned + math.log(1.0 - _FLAT_ALPHA),
+        log_q_flat + math.log(_FLAT_ALPHA),
+    )
 
 
 def layer_init(
@@ -28,6 +70,34 @@ class SpeakerNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
+
+
+class PerChannelDelta(nn.Module):
+    """Per-channel learnable quantisation widths δ_k = softplus(α_k).
+
+    Pillar 1: replaces the global scalar δ with z_dim independent widths,
+    allowing each dimension to independently adapt its bin coarseness.
+    Initialised so δ_k = delta_init for all k (matching the global-δ baseline).
+    """
+
+    def __init__(
+        self,
+        z_dim: int,
+        delta_init: float = 1.0,
+        delta_min: float = 0.1,
+        delta_max: float = 10.0,
+    ) -> None:
+        super().__init__()
+        self.delta_min = delta_min
+        self.delta_max = delta_max
+        # softplus_inv(delta_init) = log(exp(delta_init) - 1)
+        init_val = math.log(math.exp(delta_init) - 1.0)
+        self.log_alpha = nn.Parameter(torch.full((z_dim,), init_val))
+
+    def delta(self) -> torch.Tensor:
+        """δ_k = softplus(α_k) clamped to [delta_min, delta_max]."""
+        import torch.nn.functional as F
+        return F.softplus(self.log_alpha).clamp(self.delta_min, self.delta_max)
 
 
 class ListenerActor(nn.Module):
@@ -55,3 +125,283 @@ class Critic(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
+
+
+class EntropyModelFactored(nn.Module):
+    """Per-dimension Discretised Logistic Mixture prior.
+
+    q_φ(m) = ∏_k q_φ_k(m_k)
+    q_φ_k(m_k) = Σ_c π_c · [σ((m_k+1−μ_c)/s_c) − σ((m_k−μ_c)/s_c)]
+
+    Bin semantics match the actual quantiser: m = floor((z+noise)/δ), so integer
+    m is assigned all continuous mass in [m, m+1) — NOT [m−0.5, m+0.5) (rounding).
+    The floor formula σ((x+1−μ)/s) − σ((x−μ)/s) is correct; the rounding formula
+    σ((x+0.5−μ)/s) − σ((x−0.5−μ)/s) would bias μ by +0.5 relative to bin centers.
+
+    Works for both discrete m.float() (forward loss: trains q_φ) and continuous
+    z/δ (backward loss: grads flow to speaker via Ballé relaxation).
+    """
+
+    def __init__(self, z_dim: int, K: int = 5) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # (z_dim, K) — uniform mixture, centred, wide scales
+        self.log_pi = nn.Parameter(torch.zeros(z_dim, K))
+        self.mu = nn.Parameter(torch.zeros(z_dim, K))
+        self.log_s = nn.Parameter(torch.ones(z_dim, K))  # s = e ≈ 2.72 at init
+
+    @staticmethod
+    def _dlm_log_prob(
+        x: torch.Tensor,       # (..., z_dim)
+        log_pi: torch.Tensor,  # (z_dim, K)  or  (..., z_dim, K)
+        mu: torch.Tensor,      # same shape as log_pi
+        s: torch.Tensor,       # same shape as log_pi (positive)
+    ) -> torch.Tensor:         # (..., z_dim)
+        """DLM log-probability per dimension (floor bins: [x, x+1))."""
+        x_e = x.unsqueeze(-1)                                         # (..., z_dim, 1)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)                  # (..., z_dim, K)
+        lower = torch.sigmoid((x_e       - mu) / s)                  # (..., z_dim, K)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()  # (..., z_dim, K)
+        return torch.logsumexp(log_p_k, dim=-1)                       # (..., z_dim)
+
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
+        """Log q̃_φ(x) per dimension (mixture-prior). x: (..., z_dim)."""
+        # Scale floor: clamp log_s ≥ _S_LOG_MIN so s_eff ≥ 0.1; prevents DLM
+        # from collapsing to a delta function even if log_s is driven to -∞.
+        s = self.log_s.clamp(min=_S_LOG_MIN).exp()
+        log_q = self._dlm_log_prob(x, self.log_pi, self.mu, s)
+        return _mix_with_flat(log_q, x)
+
+    def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
+        """Negative log-likelihood in bits per element: −log₂ q̃_φ(x)."""
+        return -self.log_prob(x) / math.log(2)
+
+
+class EntropyModelJoint(nn.Module):
+    """Autoregressive DLM prior.
+
+    q_φ(m) = q_φ_0(m_0) · ∏_{k=1}^{K-1} q_φ_k(m_k | m_0,...,m_{k-1})
+
+    Each conditional q_φ_k is a DLM whose parameters are produced by a
+    small MLP taking the previous k dimensions as context.
+    For z_dim=1 this reduces to EntropyModelFactored.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # Dimension 0: marginal prior (no conditioning)
+        self.log_pi_0 = nn.Parameter(torch.zeros(K))
+        self.mu_0 = nn.Parameter(torch.zeros(K))
+        self.log_s_0 = nn.Parameter(torch.ones(K))  # wide init
+        # Conditional MLPs: dim k conditioned on dims 0..k-1
+        self.cond_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(k, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for k in range(1, z_dim)
+        ])
+
+    @staticmethod
+    def _dlm_log_prob_1d(
+        x: torch.Tensor,       # (...)
+        log_pi: torch.Tensor,  # (..., K)  or  (K,)
+        mu: torch.Tensor,      # (..., K)  or  (K,)
+        s: torch.Tensor,       # (..., K)  or  (K,)  — positive
+    ) -> torch.Tensor:         # (...)
+        """DLM log-probability 1D (floor bins: [x, x+1))."""
+        x_e = x.unsqueeze(-1)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)
+        lower = torch.sigmoid((x_e       - mu) / s)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
+        return torch.logsumexp(log_p_k, dim=-1)
+
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
+        """Log q̃_φ(x) per dimension (mixture-prior). x: (..., z_dim)."""
+        lp = [self._dlm_log_prob_1d(
+            x[..., 0], self.log_pi_0, self.mu_0,
+            self.log_s_0.clamp(min=_S_LOG_MIN).exp(),
+        )]
+        for k, mlp in enumerate(self.cond_mlps, start=1):
+            params = mlp(x[..., :k])           # (..., 3K)
+            log_pi_k = params[..., :self.K]
+            mu_k = params[..., self.K:2 * self.K]
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.1 even if MLP output → -∞
+            s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
+            lp.append(self._dlm_log_prob_1d(x[..., k], log_pi_k, mu_k, s_k))
+        log_q = torch.stack(lp, dim=-1)         # (..., z_dim)
+        return _mix_with_flat(log_q, x)
+
+    def nll_bits(self, x: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x) / math.log(2)
+
+
+class EntropyModelCondZ(nn.Module):
+    """Context-B DLM: q_φ(m | z). Per-dimension MLP(z) → DLM params.
+
+    Unrealistic at deployment (receiver does not observe z), but useful as an
+    oracle upper bound on rate reduction achievable with z-side information.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # One MLP per output dimension: full z → DLM params for that dimension
+        self.mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(z_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for _ in range(z_dim)
+        ])
+
+    def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Log q̃_φ(x|z) per dimension (mixture-prior). x, z: (..., z_dim)."""
+        lp = []
+        for k, mlp in enumerate(self.mlps):
+            params = mlp(z)                           # (..., 3K)
+            log_pi_k = params[..., :self.K]
+            mu_k = params[..., self.K:2 * self.K]
+            # bias +1.0 → wide init; clamp ensures s ≥ 0.1 even if MLP output → -∞
+            s_k = (params[..., 2 * self.K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
+            x_e = x[..., k].unsqueeze(-1)             # (..., 1)
+            upper = torch.sigmoid((x_e + 1.0 - mu_k) / s_k)  # floor bin [x, x+1)
+            lower = torch.sigmoid((x_e       - mu_k) / s_k)
+            log_pi_n = log_pi_k - torch.logsumexp(log_pi_k, dim=-1, keepdim=True)
+            log_p_k = log_pi_n + (upper - lower).clamp(min=1e-10).log()
+            lp.append(torch.logsumexp(log_p_k, dim=-1))  # (...)
+        log_q = torch.stack(lp, dim=-1)               # (..., z_dim)
+        return _mix_with_flat(log_q, x)
+
+    def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x, z) / math.log(2)
+
+
+class EntropyModelJointCondZ(nn.Module):
+    """Context-B autoregressive DLM: q_φ(m | z).
+
+    q(m|z) = q_0(m_0|z) · ∏_{k≥1} q_k(m_k | m_0,...,m_{k-1}, z)
+
+    Closes the 2×2 of (factored/joint) × (context A/B). Each conditional MLP
+    takes [m_{<k}, z] as context, so z informs every conditional directly.
+    For z_dim=1 this reduces to EntropyModelCondZ.
+    """
+
+    def __init__(self, z_dim: int, K: int = 5, hidden: int = 32) -> None:
+        super().__init__()
+        self.z_dim = z_dim
+        self.K = K
+        # Dim 0: conditioned on z only  (input size = z_dim)
+        self.mlp_0 = nn.Sequential(
+            nn.Linear(z_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 3 * K),
+        )
+        # Dims 1..z_dim-1: conditioned on [m_{<k}, z]  (input size = k + z_dim)
+        self.cond_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(k + z_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 3 * K),
+            )
+            for k in range(1, z_dim)
+        ])
+
+    @staticmethod
+    def _eval_dlm_1d(
+        x_k: torch.Tensor,     # (...)
+        params: torch.Tensor,  # (..., 3K)
+        K: int,
+    ) -> torch.Tensor:         # (...)
+        log_pi = params[..., :K]
+        mu = params[..., K:2 * K]
+        # bias +1.0 → wide init; clamp+exp ensures s ≥ exp(_S_LOG_MIN) = 0.1
+        s = (params[..., 2 * K:] + 1.0).clamp(min=_S_LOG_MIN).exp()
+        x_e = x_k.unsqueeze(-1)                 # (..., 1)
+        upper = torch.sigmoid((x_e + 1.0 - mu) / s)  # floor bin [x, x+1)
+        lower = torch.sigmoid((x_e       - mu) / s)
+        log_pi_n = log_pi - torch.logsumexp(log_pi, dim=-1, keepdim=True)
+        return torch.logsumexp(
+            log_pi_n + (upper - lower).clamp(min=1e-10).log(), dim=-1
+        )
+
+    def log_prob(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Log q̃_φ(x|z) per dimension (mixture-prior). x, z: (..., z_dim)."""
+        lp = [self._eval_dlm_1d(x[..., 0], self.mlp_0(z), self.K)]
+        for k, mlp in enumerate(self.cond_mlps, start=1):
+            context = torch.cat([x[..., :k], z], dim=-1)  # (..., k + z_dim)
+            lp.append(self._eval_dlm_1d(x[..., k], mlp(context), self.K))
+        log_q = torch.stack(lp, dim=-1)  # (..., z_dim)
+        return _mix_with_flat(log_q, x)
+
+    def nll_bits(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return -self.log_prob(x, z) / math.log(2)
+
+
+# ---------------------------------------------------------------------------
+# Empirical entropy utilities (no-grad, batch-level estimates)
+# ---------------------------------------------------------------------------
+
+def _marginal_entropy_bits_1d(m_col: torch.Tensor) -> float:
+    """Empirical H(m_k) in bits from a 1D integer tensor."""
+    m_np = m_col.detach().cpu().numpy().astype(int).ravel()
+    _, counts = np.unique(m_np, return_counts=True)
+    probs = counts / counts.sum()
+    return float(-(probs * np.log2(probs + 1e-12)).sum())
+
+
+def joint_entropy_bits(m: torch.Tensor) -> float:
+    """Empirical joint entropy H(m_1,...,m_K) in bits.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) — integer-valued
+    """
+    if m.ndim == 1 or m.shape[-1] == 1:
+        return _marginal_entropy_bits_1d(m)
+    m_np = m.detach().cpu().numpy().astype(int)
+    _, counts = np.unique(m_np, axis=0, return_counts=True)
+    probs = counts / counts.sum()
+    return float(-(probs * np.log2(probs + 1e-12)).sum())
+
+
+def marginal_entropies_bits(m: torch.Tensor) -> list[float]:
+    """Per-dimension empirical entropy H(m_k) in bits, for k = 0..z_dim-1.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) or (batch,) — integer-valued
+
+    Returns
+    -------
+    List of length z_dim, each element H(m_k) in bits.
+    """
+    if m.ndim == 1:
+        return [_marginal_entropy_bits_1d(m)]
+    return [_marginal_entropy_bits_1d(m[:, k]) for k in range(m.shape[-1])]
+
+
+def total_correlation_bits(m: torch.Tensor) -> float:
+    """Empirical total correlation TC = Σ_k H(m_k) − H(m) in bits.
+
+    Non-negative; equals 0 iff all dimensions are mutually independent.
+    For z_dim=1 always returns 0.0.
+
+    Parameters
+    ----------
+    m : Tensor of shape (batch, z_dim) — integer-valued
+    """
+    if m.ndim == 1 or m.shape[-1] == 1:
+        return 0.0
+    marginal_sum = float(sum(
+        _marginal_entropy_bits_1d(m[:, k]) for k in range(m.shape[-1])
+    ))
+    return max(0.0, marginal_sum - joint_entropy_bits(m))

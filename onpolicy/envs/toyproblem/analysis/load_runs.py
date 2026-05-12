@@ -106,11 +106,12 @@ def final_metrics(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """Aggregate the last *window* updates per run into per-seed summary stats.
 
     Groups by (exp_name, seed) and returns mean of the last `window` rows
-    for key performance metrics.
+    for key performance metrics.  Columns absent in *df* are silently skipped
+    (e.g. ``mag_bits_per_msg`` is present in new runs but absent in old sweeps).
     """
     key_cols = [
-        "success_rate", "bits_per_msg", "true_bits_per_msg", "mean_reward",
-        "pg_loss", "value_loss", "entropy", "comms_loss",
+        "success_rate", "bits_per_msg", "mag_bits_per_msg", "true_bits_per_msg",
+        "mean_reward", "pg_loss", "value_loss", "entropy", "comms_loss",
     ]
     key_cols = [c for c in key_cols if c in df.columns]
 
@@ -125,14 +126,17 @@ def final_metrics(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
 
 
 def seed_aggregate(summary: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
-    """Collapse per-seed summary into per-config mean ± std.
+    """Collapse per-seed summary into per-config mean ± std, plus seed count.
 
     *summary* is the output of ``final_metrics``.
-    *group_cols* lists the hyperparameter columns to group by
-    (everything except 'seed').
+    *group_cols* lists the hyperparameter columns to group by (everything except
+    'seed').  The returned DataFrame also contains an ``n_seeds`` column with
+    the number of seeds that contributed to each config row — use this to
+    compute standard errors (SE = std / sqrt(n_seeds)) and verify sweep
+    completeness.
 
-    Returns a DataFrame with columns <metric>_mean and <metric>_std for each
-    numeric metric column.
+    Returns a DataFrame with columns <metric>_mean, <metric>_std for each
+    numeric metric, plus ``n_seeds``.
     """
     numeric = summary.select_dtypes(include=[np.number]).columns.tolist()
     numeric = [c for c in numeric if c not in group_cols + ["seed"]]
@@ -140,4 +144,8 @@ def seed_aggregate(summary: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame
     agg_dict = {c: ["mean", "std"] for c in numeric}
     agg = summary.groupby(group_cols).agg(agg_dict).reset_index()
     agg.columns = ["_".join(filter(None, c)) for c in agg.columns]
+
+    # Append seed count per config for SE computation and sweep verification.
+    n_seeds_df = summary.groupby(group_cols).size().reset_index(name="n_seeds")
+    agg = agg.merge(n_seeds_df, on=group_cols, how="left")
     return agg

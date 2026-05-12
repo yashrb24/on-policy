@@ -182,7 +182,7 @@ def main() -> None:
         print()
         print("Next: run convergence gate and report:")
         print(f"  python -m onpolicy.envs.toyproblem.analysis.report_baseline "
-              f"--sweep_dir {args.log_dir} --out_dir results/toyproblem/sweep")
+              f"--sweep_dir {args.log_dir} --out_dir results")
 
 
 if __name__ == "__main__":

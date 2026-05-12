@@ -1,28 +1,37 @@
+# ── Generated outputs ─────────────────────────────────────────────────────────
+**/runs/
 **/logs/
 **/results/
-**/runs/
-.serena/
 **/nohup.out
-.idea
-*.txt
-*.pdf
-*.md
-!changes.md
-__pycache__
-results
-*.pyc
-/gifs/
-build
-win_rate
-*.so
+
+# Data / figure files (regenerable from code + runs/)
+*.pt
+*.pth
 *.csv
-RODE
-*.egg-info
-wandb
-.vscode
-api
-logs
-.nfs*
+*.pdf
+*.png
+*.json
+
+# ── Script launcher logs ──────────────────────────────────────────────────────
+scripts/experiment_log_*.txt
+scripts/pillar_experiments_*.log
+scripts/pillar_launch_stdout.txt
+
+# ── Python build artifacts ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
 *.so
+*.egg-info/
+build/
+/gifs/
+
+# ── Tools / IDE ───────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+.serena/
+wandb/
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
 .DS_Store
 **/.DS_Store
+.nfs*

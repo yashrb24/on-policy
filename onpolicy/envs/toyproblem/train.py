@@ -25,6 +25,39 @@ _GOAL_POS_TO_IDX: dict[tuple[int, int], int] = {
 
 
 # ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+
+def select_device(requested: str) -> torch.device:
+    """Return the best available device.
+
+    "auto" (default) → Apple MPS > NVIDIA CUDA > CPU, in that priority order.
+    Any explicit string (e.g. "cpu", "cuda", "cuda:1", "mps") is passed through
+    directly without probing.
+
+    Priority rationale:
+    - MPS is checked first because this codebase is primarily developed on
+      Apple M-series hardware; explicit --device cuda overrides when on a
+      GPU cluster.
+    - CUDA is checked second for NVIDIA GPU servers.
+    - CPU is the universal fallback.
+
+    MPS compatibility notes:
+    - All tensors in this codebase are float32 (MPS does not support float64).
+    - No pin_memory usage (CUDA-only feature; would error on MPS/CPU).
+    - ValueNorm.denormalize() goes .cpu().numpy() internally — safe on all devices.
+    - torch.randperm(device=mps) is supported in PyTorch >= 2.0.
+    """
+    if requested != "auto":
+        return torch.device(requested)
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+# ---------------------------------------------------------------------------
 # Seeding
 # ---------------------------------------------------------------------------
 
@@ -34,6 +67,9 @@ def set_seed(seed: int, device: torch.device) -> None:
     Covers: Python random, NumPy global, PyTorch CPU, PyTorch CUDA (if used),
     and the PYTHONHASHSEED environment variable. Also enables deterministic
     CUDA ops where possible.
+
+    MPS note: MPS ops use the CPU RNG; torch.manual_seed() above is sufficient.
+    No additional MPS-specific seed call is needed.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -58,7 +94,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exp_name", type=str, default="debug",
                    help="Experiment name; determines runs/<exp_name>/<seed>/ log path.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--device", type=str, default="auto",
+                   help="Device: 'auto' (MPS>CUDA>CPU), 'cpu', 'cuda', 'cuda:N', 'mps'.")
 
     # Rollout / training schedule
     p.add_argument("--n_envs", type=int, default=16)
@@ -93,6 +130,100 @@ def parse_args() -> argparse.Namespace:
                    help="Communication loss weight λ.")
     p.add_argument("--ste_clip", type=float, default=10.0,
                    help="Clip bound for STE channels (ste4/ste8/ste16).")
+
+    # P2 — Entropy model
+    p.add_argument("--use_entropy_model", action="store_true",
+                   help="Enable P2 entropy model (DLM prior q_φ).")
+    p.add_argument("--entropy_model_K", type=int, default=5,
+                   help="Number of mixture components in DLM prior.")
+    p.add_argument("--entropy_model_type", type=str, default="factored",
+                   choices=["factored", "joint"],
+                   help="factored: independent per-dim DLM. joint: autoregressive DLM.")
+    p.add_argument("--entropy_model_context", type=str, default="A",
+                   choices=["A", "B"],
+                   help="A: marginal prior (deployment-realistic). B: conditioned on z (oracle).")
+    p.add_argument("--lr_qphi_mult", type=float, default=10.0,
+                   help="q_φ learning rate = lr_qphi_mult × --lr.")
+    p.add_argument("--n_qphi_steps", type=int, default=3,
+                   help="q_φ gradient steps per RL minibatch.")
+    p.add_argument("--n_warmup_steps", type=int, default=5000,
+                   help="q_φ warm-start gradient steps before RL begins.")
+    p.add_argument("--loss_comms_mode", type=str, default="magnitude",
+                   choices=["magnitude", "entropy", "both"],
+                   help="magnitude: baseline Jensen surrogate. "
+                        "entropy: P2 DLM rate. both: sum of both.")
+
+    # P2 fix-ladder options (see PILLAR_P2.md §13)
+    p.add_argument("--qphi_bwd_gate_threshold", type=float, default=float("inf"),
+                   help="Level 1 fix: only fire Ballé backward when qphi_gap <= threshold. "
+                        "Default inf = disabled (always fire).")
+    p.add_argument("--use_ema_prior", action="store_true",
+                   help="Level 3 fix: use EMA shadow of q_φ for backward loss.")
+    p.add_argument("--ema_prior_momentum", type=float, default=0.95,
+                   help="Level 3: EMA momentum (higher = slower shadow update).")
+    p.add_argument("--phase1_sr_threshold", type=float, default=0.0,
+                   help="Level 5 fix: switch to entropy-only Phase 2 when rolling SR "
+                        "reaches this threshold. 0.0 = disabled.")
+
+    # P2 Option 1 — Source coding via Online Histogram + Score Function (§15)
+    p.add_argument("--use_source_coding", action="store_true",
+                   help="Enable histogram-based rate loss (Option 1 / §15 of PILLAR_P2.md). "
+                        "Replaces DLM prior with empirical frequency table + score function "
+                        "gradient. Eliminates qphi_gap bottleneck. Combine with "
+                        "--loss_comms_mode=entropy (or both) to activate compression.")
+    p.add_argument("--source_coding_smoothing", type=float, default=0.5,
+                   help="Laplace smoothing α for histogram (Jeffreys prior default: 0.5). "
+                        "Prevents zero-probability bins for unseen messages.")
+    p.add_argument("--lambda_dither", type=float, default=0.0,
+                   help="Weight for Phase 2 dither entropy loss L_dither. "
+                        "Pushes frac(z_k/δ) toward 0.5 (bin centres), reducing H(m|goal). "
+                        "For the floor SD channel, frac=0.5 is zero-noise; frac=0 is max noise. "
+                        "Only applied when training_phase==2 (after phase1_sr_threshold reached). "
+                        "0.0 = disabled (default).")
+
+    # P1 — Per-channel learnable δ_k
+    p.add_argument("--learn_delta", action="store_true",
+                   help="P1: replace global scalar δ with per-channel learned widths "
+                        "δ_k = softplus(α_k). Only active for --channel sd or nsd. "
+                        "Initialised at --delta. Design A: δ_k frozen at Phase 2 onset.")
+    p.add_argument("--learn_global_delta", action="store_true",
+                   help="E53: learn a single global δ (1 param, broadcasts over all dims). "
+                        "Mutually exclusive with --learn_delta. Useful as ablation baseline "
+                        "for per-channel δ (--learn_delta).")
+    p.add_argument("--lr_delta", type=float, default=1e-4,
+                   help="P1: Adam LR for α_k (per-channel δ parameters). "
+                        "Default 1e-4 (3× slower than speaker LR 3e-4).")
+    p.add_argument("--heuristic_delta", action="store_true",
+                   help="E56: at Phase 2 onset, set δ_k ∝ 1/H(m_k) from empirical "
+                        "histogram, then freeze. Baseline comparison for --learn_delta. "
+                        "No optimizer. Requires --use_source_coding and a phase threshold.")
+
+    # P4 — Rao-Blackwell gradient estimator
+    p.add_argument("--use_rb_gradient", action="store_true",
+                   help="P4: replace STE speaker task gradient with RB finite-difference "
+                        "estimator g_RB_k = (L(ẑ_hi) - L(ẑ_lo)) / δ_k. Active in Phase 1 "
+                        "only. Adds 2 extra listener forward passes per minibatch (joint mode).")
+    p.add_argument("--rb_mode", type=str, default="joint", choices=["joint", "per_dim"],
+                   help="P4: RB approximation mode. 'joint' (default): all dims move to lo/hi "
+                        "simultaneously (2 passes, approximate). 'per_dim': exact per-dimension "
+                        "RB (2*z_dim passes, unbiased but expensive).")
+
+    # P3 — Deployment evaluation
+    p.add_argument("--deploy_eval", action="store_true",
+                   help="P3: route listener input through the actual quantised z_hat "
+                        "(z_hat_deploy for SD, z_hat_true for NSD) instead of the STE "
+                        "z_hat used during training. Measures deployment consistency gap.")
+
+    p.add_argument("--log_grad_decomp", action="store_true",
+                   help="F14: log PPO vs SC speaker grad norms per minibatch. "
+                        "Adds compute overhead (two extra autograd.grad calls). "
+                        "Enable only for diagnostic runs (e.g. live_B / E21 re-run).")
+    p.add_argument("--log_moving_target", action="store_true",
+                   help="F19: log speaker param delta norm and offline H(m) per update. "
+                        "Offline sample uses --moving_target_n goals drawn from the "
+                        "true goal distribution. Adds a full speaker forward pass per update.")
+    p.add_argument("--moving_target_n", type=int, default=10_000,
+                   help="F19: number of offline messages for true H(m) estimate (default: 10000).")
 
     # Logging
     p.add_argument("--log_dir", type=str, default="runs",
@@ -134,13 +265,39 @@ def _setup_log_dir(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-_N_GOALS = len(_DEFAULT_GOALS)  # 6
+_N_GOALS = len(_DEFAULT_GOALS)  # should be 6
 
-CSV_HEADER = [
-    "update", "timestep", "mean_reward", "success_rate",
-    "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
-    "comms_loss", "bits_per_msg", "true_bits_per_msg", "z_norm", "sps",
-] + [f"bits_goal_{i}" for i in range(_N_GOALS)]
+
+def _build_csv_header(z_dim: int) -> list[str]:
+    """Build the full CSV header including dynamic per-dimension columns."""
+    base = [
+        "update", "timestep", "mean_reward", "success_rate",
+        "pg_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+        "comms_loss", "bits_per_msg", "mag_bits_per_msg", "true_bits_per_msg",
+        "z_norm", "sps", "shannon_gap", "bits_to_hg_ratio",
+    ]
+    per_goal_bits = [f"bits_goal_{i}" for i in range(_N_GOALS)]
+    p2_base = [
+        "entropy_rate", "H_m_empirical", "qphi_gap",
+        "tc_bits", "qphi_neg_log_max", "bits_vs_magnitude",
+        "entropy_rate_B", "context_gap_bits",
+        "entropy_loss_magnitude", "speaker_grad_norm",
+        "warm_start_bits_final",
+        "training_phase", "bwd_gate_active",
+        # Option 1 — histogram + dither metrics (NaN when disabled)
+        "hist_entropy_rate", "hist_H_empirical", "hist_qphi_gap", "sc_rate_loss",
+        "dither_loss", "H_dither_channel", "mean_frac",
+        # F14 — gradient decomposition (NaN when log_grad_decomp=False)
+        "ppo_speaker_grad_norm", "sc_speaker_grad_norm", "ppo_sc_grad_ratio",
+        # F19 — moving-target diagnostics (NaN when log_moving_target=False)
+        "speaker_param_delta_norm", "true_H_offline",
+        # P4 — Rao-Blackwell gradient (0.0 when use_rb_gradient=False)
+        "rb_task_loss",
+    ]
+    p2_per_dim = [f"H_dim_{k}" for k in range(z_dim)]
+    p2_per_goal = [f"nll_goal_{i}" for i in range(_N_GOALS)]
+    p1_delta = [f"delta_{k}" for k in range(z_dim)]
+    return base + per_goal_bits + p2_base + p2_per_dim + p2_per_goal + p1_delta
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +307,8 @@ CSV_HEADER = [
 def main() -> None:
     args = parse_args()
 
-    device = torch.device(args.device)
+    device = select_device(args.device)
+    print(f"[device] using {device} (requested: {args.device})")
     set_seed(args.seed, device)
 
     # Logging setup (before any randomness is consumed by the env).
@@ -158,116 +316,230 @@ def main() -> None:
     csv_path = run_dir / "metrics.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(CSV_HEADER)
+    csv_writer.writerow(_build_csv_header(args.z_dim))
 
-    # Environment.
-    env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
-    env.seed(args.seed)
+    try:
+        # Environment.
+        env = CommunicatingGoalVecEnv(num_envs=args.n_envs)
+        env.seed(args.seed)
 
-    # Trainer.
-    config = MAPPOConfig(
-        z_dim=args.z_dim,
-        hidden_size=args.hidden_size,
-        lr=args.lr,
-        clip_eps=args.clip_eps,
-        entropy_coef=args.entropy_coef,
-        max_grad_norm=args.max_grad_norm,
-        update_epochs=args.update_epochs,
-        num_minibatches=args.num_minibatches,
-        channel=args.channel,
-        delta=args.delta,
-        lambda_comms=args.lambda_comms,
-        ste_clip=args.ste_clip,
-    )
-    trainer = MAPPOTrainer(config, device=device)
-    buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
+        # Trainer.
+        config = MAPPOConfig(
+            z_dim=args.z_dim,
+            hidden_size=args.hidden_size,
+            lr=args.lr,
+            clip_eps=args.clip_eps,
+            entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm,
+            update_epochs=args.update_epochs,
+            num_minibatches=args.num_minibatches,
+            channel=args.channel,
+            delta=args.delta,
+            lambda_comms=args.lambda_comms,
+            ste_clip=args.ste_clip,
+            use_entropy_model=args.use_entropy_model,
+            entropy_model_K=args.entropy_model_K,
+            entropy_model_type=args.entropy_model_type,
+            entropy_model_context=args.entropy_model_context,
+            lr_qphi_mult=args.lr_qphi_mult,
+            n_qphi_steps=args.n_qphi_steps,
+            n_warmup_steps=args.n_warmup_steps,
+            loss_comms_mode=args.loss_comms_mode,
+            qphi_bwd_gate_threshold=args.qphi_bwd_gate_threshold,
+            use_ema_prior=args.use_ema_prior,
+            ema_prior_momentum=args.ema_prior_momentum,
+            phase1_sr_threshold=args.phase1_sr_threshold,
+            use_source_coding=args.use_source_coding,
+            source_coding_smoothing=args.source_coding_smoothing,
+            lambda_dither=args.lambda_dither,
+            log_grad_decomp=args.log_grad_decomp,
+            log_moving_target=args.log_moving_target,
+            moving_target_n=args.moving_target_n,
+            learn_delta=args.learn_delta,
+            learn_global_delta=args.learn_global_delta,
+            lr_delta=args.lr_delta,
+            heuristic_delta=args.heuristic_delta,
+            use_rb_gradient=args.use_rb_gradient,
+            rb_mode=args.rb_mode,
+            deploy_eval=args.deploy_eval,
+        )
+        trainer = MAPPOTrainer(config, device=device)
+        buffer = RolloutBuffer(args.n_steps, args.n_envs, args.z_dim, device=device)
 
-    n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
+        n_updates = args.total_timesteps // (args.n_envs * args.n_steps)
 
-    obs = env.reset()
-    recent_rewards: deque[float] = deque(maxlen=200)
-    recent_successes: deque[int] = deque(maxlen=200)
+        obs = env.reset()
 
-    start_time = time.time()
-    for update in range(n_updates):
-        buffer.reset()
+        # q_φ warm-start: collect one rollout then run pre-training steps.
+        if args.use_entropy_model and args.n_warmup_steps > 0:
+            buffer.reset()
+            _obs = obs
+            for _ in range(args.n_steps):
+                _goal_np, _lp_np = _obs
+                _goal = torch.from_numpy(_goal_np).to(device)
+                _lp = torch.from_numpy(_lp_np).to(device)
+                _action, _log_prob, _value = trainer.act_and_value(_goal, _lp)
+                _next_obs, _reward, _done, _info = env.step(_action.cpu().numpy())
+                _reward_shared = _reward[:, 0, 0]
+                _done_shared = _done[:, 0]
+                _goal_ids_np = np.array(
+                    [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in _goal_np],
+                    dtype=np.int64,
+                )
+                buffer.insert(
+                    _goal, _lp, _action, _log_prob, _value,
+                    torch.from_numpy(_reward_shared).to(device),
+                    torch.from_numpy(_done_shared.astype(np.float32)).to(device),
+                    goal_id=torch.from_numpy(_goal_ids_np).to(device),
+                )
+                _obs = _next_obs
+            # Use last obs to compute bootstrap value for the warm-start buffer.
+            _goal_np, _lp_np = _obs
+            _goal = torch.from_numpy(_goal_np).to(device)
+            _lp = torch.from_numpy(_lp_np).to(device)
+            _last_value = trainer.get_value(_goal, _lp)
+            buffer.compute_returns_and_advantages(
+                _last_value, trainer.value_norm, args.gamma, args.gae_lambda
+            )
+            # Restore obs for the main loop (continue from where warm-start left off).
+            obs = _obs
+            warmup_loss = trainer.warmup_entropy_model(buffer, args.n_warmup_steps)
+            print(f"[warmup] q_φ pre-training done. final_loss={warmup_loss:.4f}")
 
-        for _ in range(args.n_steps):
+        recent_rewards: deque[float] = deque(maxlen=200)
+        recent_successes: deque[int] = deque(maxlen=200)
+
+        start_time = time.time()
+        for update in range(n_updates):
+            buffer.reset()
+
+            for _ in range(args.n_steps):
+                goal_np, lp_np = obs
+                goal = torch.from_numpy(goal_np).to(device)
+                lp = torch.from_numpy(lp_np).to(device)
+
+                action, log_prob, value = trainer.act_and_value(goal, lp)
+
+                next_obs, reward, done, info = env.step(action.cpu().numpy())
+                reward_shared = reward[:, 0, 0]
+                done_shared = done[:, 0]
+
+                # Map goal positions → goal indices for per-goal bit-allocation logging.
+                goal_ids_np = np.array(
+                    [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in goal_np],
+                    dtype=np.int64,
+                )
+
+                buffer.insert(
+                    goal, lp, action, log_prob, value,
+                    torch.from_numpy(reward_shared).to(device),
+                    torch.from_numpy(done_shared.astype(np.float32)).to(device),
+                    goal_id=torch.from_numpy(goal_ids_np).to(device),
+                )
+
+                if done_shared.any():
+                    idx = np.nonzero(done_shared)[0]
+                    recent_rewards.extend(info["final_episode_reward"][idx].tolist())
+                    recent_successes.extend(info["success"][idx].tolist())
+
+                obs = next_obs
+
             goal_np, lp_np = obs
             goal = torch.from_numpy(goal_np).to(device)
             lp = torch.from_numpy(lp_np).to(device)
+            last_value = trainer.get_value(goal, lp)
 
-            action, log_prob, value = trainer.act_and_value(goal, lp)
-
-            next_obs, reward, done, info = env.step(action.cpu().numpy())
-            reward_shared = reward[:, 0, 0]
-            done_shared = done[:, 0]
-
-            # Map goal positions → goal indices for per-goal bit-allocation logging.
-            goal_ids_np = np.array(
-                [_GOAL_POS_TO_IDX.get((int(g[0]), int(g[1])), 0) for g in goal_np],
-                dtype=np.int64,
+            buffer.compute_returns_and_advantages(
+                last_value, trainer.value_norm, args.gamma, args.gae_lambda
             )
 
-            buffer.insert(
-                goal, lp, action, log_prob, value,
-                torch.from_numpy(reward_shared).to(device),
-                torch.from_numpy(done_shared.astype(np.float32)).to(device),
-                goal_id=torch.from_numpy(goal_ids_np).to(device),
-            )
+            metrics = trainer.update(buffer)
 
-            if done_shared.any():
-                idx = np.nonzero(done_shared)[0]
-                recent_rewards.extend(info["final_episode_reward"][idx].tolist())
-                recent_successes.extend(info["success"][idx].tolist())
+            timestep = (update + 1) * args.n_envs * args.n_steps
+            mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+            success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
 
-            obs = next_obs
+            # Level 5: notify trainer of current SR so it can switch phases.
+            if trainer.notify_success_rate(success_rate):
+                print(f"[phase] SR={success_rate:.3f} >= {args.phase1_sr_threshold:.3f} "
+                      f"at update {update} — switching to Phase 2 (entropy compression only)")
+            sps = timestep / (time.time() - start_time)
 
-        goal_np, lp_np = obs
-        goal = torch.from_numpy(goal_np).to(device)
-        lp = torch.from_numpy(lp_np).to(device)
-        last_value = trainer.get_value(goal, lp)
+            per_goal_bits = [
+                metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
+            ]
+            p2_base_vals = [
+                metrics.get("entropy_rate", float("nan")),
+                metrics.get("H_m_empirical", float("nan")),
+                metrics.get("qphi_gap", float("nan")),
+                metrics.get("tc_bits", float("nan")),
+                metrics.get("qphi_neg_log_max", float("nan")),
+                metrics.get("bits_vs_magnitude", float("nan")),
+                metrics.get("entropy_rate_B", float("nan")),
+                metrics.get("context_gap_bits", float("nan")),
+                metrics.get("entropy_loss_magnitude", float("nan")),
+                metrics.get("speaker_grad_norm", float("nan")),
+                metrics.get("warm_start_bits_final", float("nan")),
+                metrics.get("training_phase", float("nan")),
+                metrics.get("bwd_gate_active", float("nan")),
+                # Option 1 — histogram metrics
+                metrics.get("hist_entropy_rate", float("nan")),
+                metrics.get("hist_H_empirical", float("nan")),
+                metrics.get("hist_qphi_gap", float("nan")),
+                metrics.get("sc_rate_loss", float("nan")),
+                metrics.get("dither_loss", float("nan")),
+                metrics.get("H_dither_channel", float("nan")),
+                metrics.get("mean_frac", float("nan")),
+                # F14 — gradient decomposition
+                metrics.get("ppo_speaker_grad_norm", float("nan")),
+                metrics.get("sc_speaker_grad_norm", float("nan")),
+                metrics.get("ppo_sc_grad_ratio", float("nan")),
+                # F19 — moving-target diagnostics
+                metrics.get("speaker_param_delta_norm", float("nan")),
+                metrics.get("true_H_offline", float("nan")),
+                # P4 — Rao-Blackwell gradient
+                metrics.get("rb_task_loss", float("nan")),
+            ]
+            p2_dim_vals = [
+                metrics.get(f"H_dim_{k}", float("nan")) for k in range(args.z_dim)
+            ]
+            p2_goal_vals = [
+                metrics.get(f"nll_goal_{i}", float("nan"))
+                for i in range(_N_GOALS)
+            ]
+            p1_delta_vals = [
+                metrics.get(f"delta_{k}", float("nan")) for k in range(args.z_dim)
+            ]
+            csv_writer.writerow([
+                update, timestep, mean_reward, success_rate,
+                metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
+                metrics["approx_kl"], metrics["clip_frac"],
+                metrics["comms_loss"], metrics["bits_per_msg"],
+                metrics["mag_bits_per_msg"], metrics["true_bits_per_msg"],
+                metrics["z_norm"], sps,
+                metrics.get("shannon_gap", float("nan")),
+                metrics.get("bits_to_hg_ratio", float("nan")),
+            ] + per_goal_bits + p2_base_vals + p2_dim_vals + p2_goal_vals + p1_delta_vals)
+            csv_file.flush()
 
-        buffer.compute_returns_and_advantages(
-            last_value, trainer.value_norm, args.gamma, args.gae_lambda
-        )
+            if update % args.log_every == 0 or update == n_updates - 1:
+                print(
+                    f"[{update:4d}/{n_updates}] t={timestep:>8d} "
+                    f"reward={mean_reward:+.3f} success={success_rate:.2f} "
+                    f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
+                    f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
+                    f"clip={metrics['clip_frac']:.2f} "
+                    f"bits={metrics['bits_per_msg']:.2f} "
+                    f"bits_mag={metrics['mag_bits_per_msg']:.2f} "
+                    f"bits_true={metrics['true_bits_per_msg']:.2f} "
+                    f"sps={sps:.0f}"
+                )
 
-        metrics = trainer.update(buffer)
-
-        timestep = (update + 1) * args.n_envs * args.n_steps
-        mean_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
-        success_rate = float(np.mean(recent_successes)) if recent_successes else 0.0
-        sps = timestep / (time.time() - start_time)
-
-        per_goal_bits = [
-            metrics.get(f"bits_goal_{i}", float("nan")) for i in range(_N_GOALS)
-        ]
-        csv_writer.writerow([
-            update, timestep, mean_reward, success_rate,
-            metrics["pg_loss"], metrics["value_loss"], metrics["entropy"],
-            metrics["approx_kl"], metrics["clip_frac"],
-            metrics["comms_loss"], metrics["bits_per_msg"],
-            metrics["true_bits_per_msg"], metrics["z_norm"], sps,
-        ] + per_goal_bits)
-        csv_file.flush()
-
-        if update % args.log_every == 0 or update == n_updates - 1:
-            print(
-                f"[{update:4d}/{n_updates}] t={timestep:>8d} "
-                f"reward={mean_reward:+.3f} success={success_rate:.2f} "
-                f"pg={metrics['pg_loss']:+.4f} v={metrics['value_loss']:.4f} "
-                f"H={metrics['entropy']:.3f} kl={metrics['approx_kl']:+.4f} "
-                f"clip={metrics['clip_frac']:.2f} "
-                f"bits_surr={metrics['bits_per_msg']:.2f} "
-                f"bits_true={metrics['true_bits_per_msg']:.2f} "
-                f"sps={sps:.0f}"
-            )
-
-    csv_file.close()
-
-    ckpt_path = run_dir / "final.pt"
-    torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)
-    print(f"Done. Logs: {run_dir}/  metrics: {csv_path}  ckpt: {ckpt_path}")
+        ckpt_path = run_dir / "final.pt"
+        torch.save({"state_dict": trainer.state_dict(), "args": vars(args)}, ckpt_path)
+        print(f"Done. Logs: {run_dir}/  metrics: {csv_path}  ckpt: {ckpt_path}")
+    finally:
+        csv_file.close()
 
 
 if __name__ == "__main__":

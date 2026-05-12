@@ -1,37 +1,25 @@
-"""Generate results/toyproblem/baseline.md from sweep run data.
+"""Generate baseline.md and figures from sweep run data.
 
 Usage (after Stage A / B sweeps complete):
 
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
         python -m onpolicy.envs.toyproblem.analysis.report_baseline \
-        --sweep_dir runs/toyproblem/sweep_stage_a \
-        --out_dir results/toyproblem/sweep_stage_a
+        --sweep_dir runs/sc_ablation \
+        --out_dir results
 
-Requires: analysis/load_runs.py, analysis/stats.py, analysis/plots.py
+Requires: analysis/load_runs.py, analysis/stats.py, analysis/paper_figures.py
 """
 from __future__ import annotations
 
 import argparse
-import textwrap
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 from .load_runs import load_sweep, final_metrics, seed_aggregate
-from .stats import bootstrap_ci, iqm_ci, pareto_frontier, compare_configs
-from .plots import (
-    plot_training_curves,
-    plot_rate_distortion,
-    plot_per_goal_bits,
-    plot_channel_comparison,
-    plot_bits_vs_entropy,
-)
+from .stats import bootstrap_ci, iqm_ci, compare_configs
+from .paper_figures import generate_sweep_figures
 from .sweep_convergence import check_convergence
-
-# Shannon entropy of the goal distribution — imported here for use in plots.
-# Defined alongside the channel constants so there is one source of truth.
-from onpolicy.envs.toyproblem.channels import H_GOAL_BITS, GOAL_OPTIMAL_BITS
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +49,6 @@ def generate_report(
     out_dir: str | Path,
     metric: str = "success_rate",
     bits_col: str = "bits_per_msg",
-    true_bits_col: str = "true_bits_per_msg",
     window: int = 20,
     sweep_axes: list[str] | None = None,
     n_perm: int = 10_000,
@@ -87,99 +74,8 @@ def generate_report(
     # ------------------------------------------------------------------
     # Plots
     # ------------------------------------------------------------------
-    print("Generating plots …")
-
-    # 1. Training curves per channel
-    if "channel" in df.columns:
-        plot_training_curves(
-            df, y_col="success_rate", group_col="channel",
-            title="Success rate by channel type",
-            save_path=plots_dir / "training_curves_success.png",
-        )
-        # Surrogate bits (used in training loss — always logged)
-        plot_training_curves(
-            df, y_col="bits_per_msg", group_col="channel",
-            title="Surrogate bits/msg (Jensen UB on |z|/δ) by channel type",
-            save_path=plots_dir / "training_curves_bits_surrogate.png",
-        )
-        # True transmission bits (float32 for none, log₂|m|+1 for quantized)
-        if "true_bits_per_msg" in df.columns:
-            plot_training_curves(
-                df, y_col="true_bits_per_msg", group_col="channel",
-                title="True transmission bits/msg by channel type\n"
-                      "(none=32×z_dim, sd/nsd/additive=log₂|m|+1, ste=B×z_dim)",
-                save_path=plots_dir / "training_curves_bits_true.png",
-            )
-
-    # 2. Rate–distortion frontier
     agg = seed_aggregate(summary, group_cols)
-    grp_col = "channel" if "channel" in agg.columns else group_cols[0]
-
-    # 2a. Surrogate bits (training objective perspective)
-    pf = pareto_frontier(agg, x_col=f"{metric}_mean", y_col=f"{bits_col}_mean",
-                         x_better="higher", y_better="lower")
-    plot_rate_distortion(
-        agg, x_col=f"{bits_col}_mean", y_col=f"{metric}_mean",
-        group_col=grp_col, pareto_df=pf, h_goal=H_GOAL_BITS,
-        title="Rate–distortion (surrogate bits: Jensen UB on |z|/δ)",
-        save_path=plots_dir / "rate_distortion_surrogate.png",
-    )
-
-    # 2b. True transmission bits (deployment perspective) — requires true_bits_per_msg
-    true_bits_col = true_bits_col if true_bits_col in agg.columns else f"{true_bits_col}_mean"
-    true_bits_mean_col = f"{true_bits_col}_mean" if f"{true_bits_col}_mean" in agg.columns else None
-    if true_bits_mean_col and true_bits_mean_col in agg.columns:
-        pf_true = pareto_frontier(agg, x_col=f"{metric}_mean",
-                                  y_col=true_bits_mean_col,
-                                  x_better="higher", y_better="lower")
-        plot_rate_distortion(
-            agg, x_col=true_bits_mean_col, y_col=f"{metric}_mean",
-            group_col=grp_col, pareto_df=pf_true, h_goal=H_GOAL_BITS,
-            title="Rate–distortion (true transmission bits)\n"
-                  "none=32×z_dim  |  sd/nsd/additive=log₂|m|+1  |  ste=B×z_dim",
-            save_path=plots_dir / "rate_distortion_true.png",
-        )
-
-    # Keep legacy filename as symlink to surrogate for backward compat
-    import shutil
-    legacy = plots_dir / "rate_distortion.png"
-    src = plots_dir / "rate_distortion_surrogate.png"
-    if src.exists() and not legacy.exists():
-        shutil.copy2(src, legacy)
-
-    # 3. Per-goal bits vs optimal -log₂(p_i) allocation
-    goal_cols = [c for c in df.columns if c.startswith("bits_goal_")]
-    if goal_cols:
-        # Compute total_updates from fixed Stage A config.
-        _n_envs = int(df["n_envs"].iloc[0]) if "n_envs" in df.columns else 16
-        _n_steps = int(df["n_steps"].iloc[0]) if "n_steps" in df.columns else 256
-        _total_ts = int(df["total_timesteps"].iloc[0]) if "total_timesteps" in df.columns else 1_000_000
-        _total_updates = _total_ts // (_n_envs * _n_steps)
-
-        from onpolicy.envs.toyproblem.channels import _GOAL_PROBS
-        plot_per_goal_bits(
-            df, n_goals=len(goal_cols),
-            group_col="channel" if "channel" in df.columns else group_cols[0],
-            goal_optimal_bits=GOAL_OPTIMAL_BITS,
-            goal_probs=_GOAL_PROBS,
-            total_updates=_total_updates,
-            show_uncertainty=True,
-            save_path=plots_dir / "per_goal_bits.png",
-        )
-
-    # 4. Channel comparison bar chart
-    if "channel" in summary.columns:
-        plot_channel_comparison(
-            summary, metrics=["success_rate", "bits_per_msg"],
-            save_path=plots_dir / "channel_comparison.png",
-        )
-
-    # 5. Bits vs Shannon entropy (true transmission bits vs H(G))
-    if true_bits_col in summary.columns and "channel" in summary.columns:
-        plot_bits_vs_entropy(
-            summary, h_goal=H_GOAL_BITS, bits_col=true_bits_col,
-            save_path=plots_dir / "bits_vs_entropy.png",
-        )
+    generate_sweep_figures(df, summary, agg, out_dir=plots_dir)
 
     # ------------------------------------------------------------------
     # Convergence gate
@@ -258,10 +154,19 @@ def generate_report(
         "",
         "## Plots",
         "",
-        "![Training curves](plots/training_curves_success.png)",
-        "![Rate–distortion](plots/rate_distortion.png)",
-        "![Channel comparison](plots/channel_comparison.png)",
-        "![Per-goal bits](plots/per_goal_bits.png)",
+        "### Main paper figures",
+        "![Rate–distortion frontier](figures/main/fig1_rate_distortion.png)",
+        "![Channel comparison](figures/main/fig2_channel_comparison.png)",
+        "",
+        "### Appendix figures",
+        "![λ sensitivity](figures/appendix/appA_lambda_sensitivity.png)",
+        "![δ×λ heatmap](figures/appendix/appB_delta_lambda_heatmap.png)",
+        "![Training dynamics](figures/appendix/appC_training_dynamics.png)",
+        "![Per-goal allocation](figures/appendix/appD_per_goal_allocation.png)",
+        "![Overhead above H(G)](figures/appendix/appE_overhead_above_hg.png)",
+        "![Surrogate calibration](figures/appendix/appF_surrogate_calibration.png)",
+        "![z_dim scaling](figures/appendix/appG_zdim_scaling.png)",
+        "![SD vs NSD](figures/appendix/appH_sd_nsd_comparison.png)",
     ]
 
     out_path = out_dir / "baseline.md"
@@ -277,8 +182,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate baseline.md from sweep runs.")
     p.add_argument("--sweep_dir", type=str, required=True,
                    help="Root directory of sweep runs (contains <exp_name>/<seed>/ structure).")
-    p.add_argument("--out_dir", type=str, default="results/toyproblem",
-                   help="Directory to write baseline.md and plots/.")
+    p.add_argument("--out_dir", type=str, default="results",
+                   help="Directory to write baseline.md and plots/. Figures land in <out_dir>/figures/.")
     p.add_argument("--metric", type=str, default="success_rate")
     p.add_argument("--bits_col", type=str, default="bits_per_msg")
     p.add_argument("--window", type=int, default=20,

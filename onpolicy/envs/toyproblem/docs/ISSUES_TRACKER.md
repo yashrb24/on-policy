@@ -323,6 +323,41 @@ These are upstream bugs in the shared `on-policy` repository. They were found du
 
 ---
 
+### [CODE-010] P2 `entropy_rate` dimensional mismatch — qphi_gap negative for z_dim > 1
+- **Phase discovered:** Phase 3 (P2-A ablation analysis, 2026-04-27)
+- **Date:** 2026-04-27
+- **Symptom:** `qphi_gap` was negative (e.g. −0.4 bits) for all joint/factored model configs with z_dim=2. Appears to violate the Gibbs inequality NLL(q_φ; p) ≥ H(p).
+- **Root cause:** `trainer.py` computed `entropy_rate = nll_log.mean().item()` where `nll_log` has shape `(mb, z_dim)`. `.mean()` averages over *both* axes, producing `NLL_joint / z_dim` (per-element NLL), not `NLL_joint`. This was then compared to `H_m_empirical = joint_entropy_bits()` which gives the true joint H(m₀,m₁). For z_dim=2 the actual NLL_joint ≈ 5.8 bits but entropy_rate was reported as 2.9, giving qphi_gap = 2.9 − 3.3 = −0.4. Gibbs IS satisfied at joint level (5.8 ≥ 3.3).
+  - Same bug in context-B companion: `entropy_rate_B = nll_B.mean()` (should be `.sum(dim=-1).mean()`).
+  - `qphi_neg_log_max` had same issue (`.max()` over all elements vs `.sum(dim=-1).max()`).
+- **Fix:** (2026-04-27) In `trainer.py` lines 359–360: `nll_log.mean()` → `nll_log.sum(dim=-1).mean()` and `nll_log.max()` → `nll_log.sum(dim=-1).max()`. Same fix for `entropy_rate_B`. All values now in bits-per-message (joint), consistent with `H_m_empirical`.
+- **Status:** ✅ RESOLVED (2026-04-27)
+- **Reproducibility impact:** YES — all P2-A ablation metrics (`entropy_rate`, `qphi_gap`, `qphi_neg_log_max`, `entropy_rate_B`, `context_gap_bits`) in `runs/toyproblem/p2_ablation/` are incorrect. The P2-A sweep must be re-run after this fix to get valid measurements.
+
+---
+
+### [CODE-011] P2 per-goal `entropy_rate_goal_<k>` mislabeled — values are model NLL not empirical entropy
+- **Phase discovered:** Phase 3 (P2-A ablation analysis, 2026-04-27)
+- **Date:** 2026-04-27
+- **Symptom:** `entropy_rate_goal_{g}` columns in P2 CSV reported values of 5–12 bits for joint models (z_dim=2), when empirical goal entropy H(m|goal) should be ≤ H(G) ≈ 1.81 bits.
+- **Root cause:** The column stores `nll_log.sum(dim=-1)` filtered by goal — the *model's NLL on that goal's messages* (how many bits q_φ assigns to them), not the empirical entropy H(m|goal=g). These are different quantities; the column name was misleading.
+- **Fix:** (2026-04-27) Renamed column from `entropy_rate_goal_{g}` to `nll_goal_{g}` in `trainer.py`, `train.py` (`_build_csv_header` and writer). Existing P2 CSVs have the old column name.
+- **Status:** ✅ RESOLVED (2026-04-27)
+- **Reproducibility impact:** YES — P2-A CSVs have column `entropy_rate_goal_*` (stale name). Re-run P2-A with current code to get `nll_goal_*` columns.
+
+---
+
+### [CODE-012] Ballé backward loss used per-element NLL scale — effective λ halved for z_dim=2
+- **Phase discovered:** Phase 3 (fix-ladder implementation, 2026-04-28)
+- **Date:** 2026-04-28
+- **Symptom:** The effective strength of the entropy backward signal was half what λ implied for z_dim=2, quarter for z_dim=4, etc. The `entropy_loss_magnitude` metric also reported the wrong (halved) value, making the 1.5% gradient ratio look like 3% in truth.
+- **Root cause:** The Ballé backward loss in Step 3 used `nll_bwd.mean()` which averages over ALL `(mb, z_dim)` elements, giving per-element NLL (NLL_joint / z_dim). The `entropy_loss_magnitude` metric had the same bug. The intended quantity is `nll_bwd.sum(dim=-1).mean()` — joint NLL per message — so that λ's interpretation is "bits of gradient pressure per joint message" regardless of z_dim.
+- **Fix:** (2026-04-28) In `trainer.py` Step 3: `nll_bwd.mean()` → `nll_bwd.sum(dim=-1).mean()`. In `entropy_loss_magnitude` metric: `.mean()` → `.sum(dim=-1).mean()`.
+- **Status:** ✅ RESOLVED (2026-04-28)
+- **Reproducibility impact:** LOW — the gradient direction was correct; only the scale changed by factor z_dim. P2-A results (all runs at z_dim=2) had effective λ = 2.5e-4 instead of 5e-4 for the entropy term. This does not change the qualitative conclusion (entropy was too weak), but the numerical comparison across z_dim values in P2-C would have been misleading.
+
+---
+
 ### [CODE-008] Stage A `none` channel redundancy — 45 of 48 runs per z_dim are no-ops
 - **Phase discovered:** Phase 2 (pre-sweep verification, 2026-04-24)
 - **Date:** 2026-04-24

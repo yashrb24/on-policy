@@ -34,7 +34,7 @@ After runs complete, generate the report:
     KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
         python -m onpolicy.envs.toyproblem.analysis.report_baseline \
         --sweep_dir runs/toyproblem/channel_comparison \
-        --out_dir results/toyproblem/channel_comparison
+        --out_dir results
 """
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ def main() -> None:
         print("To generate comparison report:")
         print(
             f"  python -m onpolicy.envs.toyproblem.analysis.report_baseline "
-            f"--sweep_dir {args.log_dir} --out_dir results/toyproblem/channel_comparison"
+            f"--sweep_dir {args.log_dir} --out_dir results"
         )
 
 

@@ -30,7 +30,7 @@
 | 0 — Hygiene & principles | ✅ DONE | 28 passed, 23 skipped, 0 failed |
 | 1 — Verify & tighten DDCL | ✅ DONE | 51 passed, 0 skipped, 0 failed |
 | 2 — Hyperparameter sweeps | 🔶 INFRA DONE | 79 passed, 0 failed; sweeps pending compute |
-| 3 — 4 Pillars (P2→P1→P4→P3) | 🔲 TODO | — |
+| 3 — 4 Pillars (P2→P1→P4→P3) | 🔶 P2 DONE | 118 passed, 0 failed |
 | 4 — Combined + scaling | 🔲 TODO | — |
 | 5 — Docs & reproducibility | 🔲 TODO | — |
 
@@ -183,7 +183,7 @@ Each figure function carries a docstring with three annotated fields:
 
 | Figure | Function | Hypothesis |
 |--------|----------|------------|
-| Fig 1 | `plot_paper_rate_distortion` | DDCL lies on the Pareto frontier; STE uses far more bits for the same SR |
+| Fig 1 | `plot_paper_rate_distortion` | DDCL lies on the Pareto frontier; SD's entire λ-sweep trade-off curve dominates additive-uniform, not just the single best config |
 | Fig 2 | `plot_paper_training_curves` | All channels converge; λ>0 trades convergence speed for compression |
 | Fig 3 | `plot_paper_per_goal_allocation` | Speaker learns -log₂(p_i) allocation without explicit supervision |
 | Fig 4 | `plot_paper_lambda_sensitivity` | Smooth rate-distortion tradeoff; knee identifies optimal λ* |
@@ -223,7 +223,18 @@ generate_all_paper_figures(df, summary, agg, out_dir="results/toyproblem/sweep_s
 
 **Recipe for each pillar:** Derive loss → Implement (toggleable, baseline bit-identical when off) → Unit tests → Sanity run → Pillar-specific sweep (§2.3 gate) → `configs/pillarN_best.yaml` → `results/toyproblem/pillarN/baseline.md`.
 
-### 3.1 P2 — Entropy-model communication cost
+### 3.1 P2 — Entropy-model communication cost ✅ DONE
+
+**Implementation checklist (all done):**
+- [x] P2: EntropyModelFactored (network.py)
+- [x] P2: EntropyModelJoint (network.py)
+- [x] P2: EntropyModelCondZ / Context B (network.py)
+- [x] P2: EntropyModelJointCondZ (network.py)
+- [x] P2: Ballé gradient path + q_φ optimizer (trainer.py)
+- [x] P2: warm-start (trainer.py)
+- [x] P2: P2 metrics in CSV (trainer.py + train.py)
+- [x] P2: run_p2_ablation.py
+- [x] P2: paper figures
 
 - New `entropy_model.py`: discretised logistic mixture, `K` components, MLP context `h`. Valid PMF output.
 - `channels.py`: expose quantised integer `m` in forward info dict.
@@ -331,6 +342,7 @@ generate_all_paper_figures(df, summary, agg, out_dir="results/toyproblem/sweep_s
 | 1 | All skipped MC/gradient tests green; bit-cost formula fixed and tested | ✅ DONE — 51 passed, 0 skipped, 0 failed |
 | 2 (infra) | analysis/, sweep scripts, baseline channels, validation scripts | ✅ DONE — 79 passed, 0 failed |
 | 2 (sweeps) | Convergence gate passes (§2.3 all 4 criteria); `baseline_best.yaml` frozen | 🔶 RUNNING — Stage A ~98/2175 done |
-| 3 (per pillar) | Pillar-off = baseline bit-identical; pillar sweep passes §2.3 gate | 🔲 TODO |
+| 3 (P2) | Smoke test: entropy_rate finite and non-NaN; 118 tests pass | ✅ DONE |
+| 3 (P1/P4/P3) | Pillar-off = baseline bit-identical; pillar sweep passes §2.3 gate | 🔲 TODO |
 | 4 | Unleashed on Pareto frontier vs all baselines; leave-one-out ablation passes | 🔲 TODO |
 | 5 | Cold reader reproduces any headline result from `REPRODUCE.md` | 🔲 TODO |

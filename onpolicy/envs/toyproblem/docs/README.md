@@ -35,8 +35,8 @@ Read this section first to know where to look for any given type of information.
 | **`docs/ISSUES_TRACKER.md`** | Authoritative log of every bug, installation issue, test failure, math error, or reproducibility blocker encountered during development. Each entry has: symptom, root cause, fix, status, reproducibility impact. Also contains the master reproducibility checklist and a section for pre-existing upstream bugs. |
 | **`CONTEXT.md`** | Living session log. Tracks the true current state of the project: phase status, what is fully done, immediate next tasks, key decisions, and a per-session log of what was done, found, and fixed. **Read this at the start of every session.** |
 | **`PLAN.md`** | Full approved 5-phase project plan with detailed sub-tasks, success criteria, and gating conditions for each phase. Authoritative reference for scope and phase sequencing. |
-| **`results/toyproblem/`** | Auto-generated result artefacts (repo root, gitignored). Each sub-directory corresponds to one experiment (e.g. `channel_comparison/`, `sweep_stage_a/`). Contains `baseline.md` (convergence gate report) and `figures/` with all plots. Do not edit by hand — regenerate by running `report_baseline.py` and `generate_all_paper_figures`. |
-| **`runs/toyproblem/`** | Raw training output (repo root, gitignored). Each sub-directory corresponds to one experiment. Contains per-seed subdirectories with `metrics.csv`, `config.json`, `final.pt`. |
+| **`results/`** | ALL processed outputs — single canonical location (repo root, gitignored). Sub-directories: `aggregated/summary.csv` (mean±std at convergence per experiment), `post_hoc/<exp>/seed_<seed>.json` (rate decomposition JSONs), `figures/` (all paper and diagnostic figures, .png and .pdf), `reports/` (text convergence reports). Do not edit by hand — regenerate via `aggregate_results.py`, `post_hoc_coding.py`, `report_baseline.py`, and `paper_figures.py`. |
+| **`runs/`** | Raw training output (repo root, gitignored). Sub-directories are named by log_dir + exp_name convention: `runs/sc_ablation/<exp_name>/<seed>/` for the main sc-ablation batch, `runs/<sweep_name>/` for sweep-era experiments. Each seed directory contains `metrics.csv`, `config.json`, `final.pt`. |
 
 ---
 
@@ -350,10 +350,10 @@ KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     --z_dim 2 \
     --total_timesteps 100000 \
     --seed 0 \
-    --log_dir runs/toyproblem/smoke
+    --log_dir runs/smoke
 ```
 
-Check that `runs/toyproblem/smoke/smoke_sd/0/metrics.csv` was written and contains
+Check that `runs/smoke/smoke_sd/0/metrics.csv` was written and contains
 `true_bits_per_msg` and `bits_goal_0`…`bits_goal_5` columns.
 
 ---
@@ -374,11 +374,11 @@ Generate report and plots:
 ```bash
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.envs.toyproblem.analysis.report_baseline \
-    --sweep_dir runs/toyproblem/channel_comparison \
-    --out_dir results/toyproblem/channel_comparison
+    --sweep_dir runs/channel_comparison \
+    --out_dir results
 ```
 
-Results: `results/toyproblem/channel_comparison/baseline.md` + `results/toyproblem/channel_comparison/figures/`.
+Results: `results/reports/baseline.md` + `results/figures/`.
 The convergence gate will FAIL here (only one λ/δ point per channel — not a sweep).
 That is expected. Use fig1 to check that `none` sits at high bits and `sd`/`nsd` are
 somewhere on a lower-bits frontier.
@@ -397,7 +397,7 @@ KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
     --seeds 0 1 2 3 4 \
-    --log_dir runs/toyproblem/sweep_stage_a \
+    --log_dir runs/sweep_stage_a \
     --dry_run
 ```
 
@@ -407,7 +407,7 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
     --seeds 0 1 2 3 4 \
-    --log_dir runs/toyproblem/sweep_stage_a \
+    --log_dir runs/sweep_stage_a \
     --resume --shuffle' > /tmp/sweep_stage_a.log 2>&1 &
 echo "Sweep PID=$!"
 ```
@@ -418,7 +418,7 @@ echo "Sweep PID=$!"
 ps aux | grep run_sweep | grep -v grep
 
 # How many runs are complete?
-find runs/toyproblem/sweep_stage_a -name "metrics.csv" | wc -l
+find runs/sweep_stage_a -name "metrics.csv" | wc -l
 
 # Live log tail
 tail -f /tmp/sweep_stage_a.log
@@ -430,7 +430,7 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_a.yaml \
     --seeds 0 1 2 3 4 \
-    --log_dir runs/toyproblem/sweep_stage_a \
+    --log_dir runs/sweep_stage_a \
     --resume --shuffle' > /tmp/sweep_stage_a.log 2>&1 &
 ```
 
@@ -446,23 +446,23 @@ sweep output. Run this at any point — even while the sweep is still running �
 completes for the final analysis.
 
 ```bash
-# Standard report + diagnostic plots → results/toyproblem/sweep_stage_a/figures/
+# Standard report + diagnostic plots → results/figures/
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms \
     python -m onpolicy.envs.toyproblem.analysis.report_baseline \
-    --sweep_dir runs/toyproblem/sweep_stage_a \
-    --out_dir results/toyproblem/sweep_stage_a
+    --sweep_dir runs/sweep_stage_a \
+    --out_dir results
 ```
 
 ```bash
-# Publication-quality figures (fig1–fig10) → same figures/ directory
+# Publication-quality figures (fig1–fig10) → results/figures/
 KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms python -c "
 from onpolicy.envs.toyproblem.analysis.load_runs import load_sweep, final_metrics, seed_aggregate
 from onpolicy.envs.toyproblem.analysis.paper_figures import generate_all_paper_figures
-df = load_sweep('runs/toyproblem/sweep_stage_a')
+df = load_sweep('runs/sweep_stage_a')
 summary = final_metrics(df)
 agg = seed_aggregate(summary, group_cols=['channel','lambda_comms','delta','z_dim'])
 generate_all_paper_figures(df, summary, agg,
-    out_dir='results/toyproblem/sweep_stage_a/figures')
+    out_dir='results/figures')
 "
 ```
 
@@ -486,11 +486,11 @@ nohup bash -c 'cd "$(pwd)" && KMP_DUPLICATE_LIB_OK=TRUE conda run -n marl_comms 
     python -m onpolicy.scripts.sweeps.toyproblem.run_sweep \
     --config onpolicy/scripts/sweeps/toyproblem/configs/sweep_stage_b.yaml \
     --seeds 0 1 2 3 4 \
-    --log_dir runs/toyproblem/sweep_stage_b \
+    --log_dir runs/sweep_stage_b \
     --resume --shuffle' > /tmp/sweep_stage_b.log 2>&1 &
 ```
 
-Analyse with the same `report_baseline.py` command (point `--sweep_dir` at `runs/toyproblem/sweep_stage_b`).
+Analyse with the same `report_baseline.py` command (point `--sweep_dir` at `runs/sweep_stage_b`).
 
 ---
 

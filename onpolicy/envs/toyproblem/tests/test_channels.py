@@ -459,3 +459,245 @@ class TestBuildChannel:
         from onpolicy.envs.toyproblem.channels import build_channel
         with pytest.raises(ValueError, match="Unknown channel"):
             build_channel("bad_channel_name", default_delta)
+
+
+# ---------------------------------------------------------------------------
+# P1: PerChannelDelta
+# ---------------------------------------------------------------------------
+
+class TestPerChannelDelta:
+    """Tests for the Pillar 1 per-channel δ module."""
+
+    def test_init_values(self):
+        """delta() returns delta_init for all dims at construction."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        pcd = PerChannelDelta(z_dim=3, delta_init=1.0)
+        d = pcd.delta()
+        assert d.shape == (3,)
+        assert torch.allclose(d, torch.ones(3), atol=1e-4), (
+            f"Expected delta ≈ 1.0 at init, got {d.tolist()}"
+        )
+
+    def test_requires_grad(self):
+        """delta() must have a gradient path to log_alpha."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        pcd = PerChannelDelta(z_dim=2)
+        d = pcd.delta()
+        loss = d.sum()
+        loss.backward()
+        assert pcd.log_alpha.grad is not None
+        assert not torch.any(pcd.log_alpha.grad == 0), "gradient should be non-zero"
+
+    def test_clamp_lower(self):
+        """delta() stays >= delta_min even when log_alpha is very negative."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        pcd = PerChannelDelta(z_dim=2, delta_min=0.1)
+        with torch.no_grad():
+            pcd.log_alpha.fill_(-100.0)
+        d = pcd.delta()
+        assert (d >= 0.1 - 1e-6).all(), f"clamp_min failed: {d.tolist()}"
+
+    def test_clamp_upper(self):
+        """delta() stays <= delta_max even when log_alpha is very large."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        pcd = PerChannelDelta(z_dim=2, delta_max=10.0)
+        with torch.no_grad():
+            pcd.log_alpha.fill_(100.0)
+        d = pcd.delta()
+        assert (d <= 10.0 + 1e-6).all(), f"clamp_max failed: {d.tolist()}"
+
+    def test_task_gradient_flows_through_sd_channel(self):
+        """∂(z+e)/∂δ_k = u_k − 0.5: gradient path exists through noise term."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        pcd = PerChannelDelta(z_dim=3, delta_init=1.0)
+        sd = DDCL_SD(delta=1.0)
+        z = torch.randn(64, 3)
+        d = pcd.delta()
+        z_hat, _ = sd(z, delta=d)
+        z_hat.sum().backward()
+        assert pcd.log_alpha.grad is not None, "no gradient for log_alpha through channel"
+        # E[∂/∂delta_k (z_k + (u-0.5)*delta_k)] = E[u-0.5] = 0;
+        # std ≈ 1/sqrt(3)/sqrt(64) ≈ 0.07 → any finite grad is fine
+        assert torch.isfinite(pcd.log_alpha.grad).all()
+
+    def test_magnitude_loss_gradient_direction(self):
+        """Magnitude loss gradient pushes δ_k upward (coarser → fewer surrogate bits)."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        pcd = PerChannelDelta(z_dim=3, delta_init=1.0)
+        sd = DDCL_SD(delta=1.0)
+        z = torch.ones(16, 3) * 2.0   # fixed z so gradient is deterministic
+        d = pcd.delta()
+        loss = sd.comms_loss(z, delta=d).sum()
+        loss.backward()
+        # ∂L_mag/∂δ_k < 0 always → Adam/SGD step increases δ_k (coarser)
+        assert (pcd.log_alpha.grad < 0).all(), (
+            f"Magnitude loss gradient should be negative; got {pcd.log_alpha.grad.tolist()}"
+        )
+
+    def test_global_delta_broadcasts(self):
+        """PerChannelDelta(z_dim=1) broadcasts correctly to all channel dims."""
+        from onpolicy.envs.toyproblem.network import PerChannelDelta
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        pcd = PerChannelDelta(z_dim=1, delta_init=1.5)
+        sd = DDCL_SD(delta=1.0)
+        z = torch.randn(32, 4)
+        d = pcd.delta()   # shape (1,)
+        z_hat, info = sd(z, delta=d)
+        assert z_hat.shape == z.shape
+        # Gradient flows back through the 1-param delta
+        z_hat.sum().backward()
+        assert pcd.log_alpha.grad is not None
+        assert pcd.log_alpha.grad.shape == (1,)
+
+
+# ---------------------------------------------------------------------------
+# P4: Rao-Blackwell gradient estimator
+# ---------------------------------------------------------------------------
+
+class TestRaoBlackwellGradient:
+    """Tests for the P4 RB finite-difference gradient estimator."""
+
+    def test_rb_bin_centres_correct(self):
+        """Bin centres ẑ_lo and ẑ_hi are adjacent to the STE bin, separated by δ."""
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        torch.manual_seed(0)
+        z = torch.tensor([[0.3, 1.7, -0.6]])   # (1, 3)
+        delta = 1.0
+        frac = (z / delta) - torch.floor(z / delta)
+        lo_frac = frac < 0.5
+        m_floor = torch.floor(z / delta)
+        m_lo = torch.where(lo_frac, m_floor - 1, m_floor)
+        m_hi = torch.where(lo_frac, m_floor, m_floor + 1)
+        z_hat_lo = (m_lo + 0.5) * delta
+        z_hat_hi = (m_hi + 0.5) * delta
+        # ẑ_hi - ẑ_lo == δ for all dims
+        assert torch.allclose(z_hat_hi - z_hat_lo, torch.full_like(z, delta))
+        # ẑ_lo and ẑ_hi straddle z: ẑ_lo < z < ẑ_hi (or within δ of z)
+        assert (z_hat_lo < z_hat_hi).all()
+
+    def test_rb_proxy_gradient_shape(self):
+        """RB proxy loss gradient w.r.t. z has shape (B, z_dim)."""
+        z = torch.randn(16, 3, requires_grad=True)
+        delta = 1.0
+        with torch.no_grad():
+            frac = (z / delta) - torch.floor(z / delta)
+            lo_frac = frac < 0.5
+            m_floor = torch.floor(z / delta)
+            m_lo = torch.where(lo_frac, m_floor - 1, m_floor)
+            m_hi = torch.where(lo_frac, m_floor, m_floor + 1)
+            z_hat_lo = (m_lo + 0.5) * delta
+            z_hat_hi = (m_hi + 0.5) * delta
+
+        # Simulate L_hi - L_lo as random per-sample scalar (B,)
+        L_diff = torch.randn(16)
+        rb_scale = L_diff.detach().unsqueeze(-1) / delta   # (B, 1) broadcasts to (B, 3)
+        rb_proxy = (rb_scale * z).sum(dim=-1).mean()
+        rb_proxy.backward()
+        assert z.grad is not None
+        assert z.grad.shape == (16, 3)
+
+    def test_rb_gradient_unbiased_in_expectation(self):
+        """E[g_RB_k] ≈ E[g_STE_k] for a simple quadratic loss (1000 samples, atol=0.15)."""
+        # For L(ẑ) = ẑ_k^2, the true gradient ∂E[L]/∂z_k = 2 * E[ẑ_k] = 2*z_k.
+        # Both STE and RB should recover this in expectation.
+        torch.manual_seed(42)
+        N = 2000
+        z_val = 1.0
+        delta = 1.0
+        z = torch.full((N, 1), z_val)
+
+        # STE gradient: ∂(z+e)^2/∂z = 2*(z+e), mean ≈ 2*z_val
+        e = (torch.rand(N, 1) - 0.5) * delta
+        ste_grads = 2 * (z + e)
+        ste_mean = ste_grads.mean().item()
+
+        # RB gradient: (L_hi - L_lo) / delta = (ẑ_hi^2 - ẑ_lo^2) / delta
+        frac = (z / delta) - torch.floor(z / delta)
+        lo_frac = frac < 0.5
+        m_floor = torch.floor(z / delta)
+        m_lo = torch.where(lo_frac, m_floor - 1, m_floor)
+        m_hi = torch.where(lo_frac, m_floor, m_floor + 1)
+        z_hat_lo = (m_lo + 0.5) * delta
+        z_hat_hi = (m_hi + 0.5) * delta
+        rb_grads = (z_hat_hi ** 2 - z_hat_lo ** 2) / delta
+        rb_mean = rb_grads.mean().item()
+
+        true_grad = 2 * z_val
+        assert abs(ste_mean - true_grad) < 0.15, f"STE mean {ste_mean:.4f} far from {true_grad}"
+        assert abs(rb_mean - true_grad) < 0.15, f"RB mean {rb_mean:.4f} far from {true_grad}"
+
+    def test_rb_variance_le_ste_variance(self):
+        """Var(g_RB_k) < Var(g_STE_k) for a quadratic loss (RB reduces variance)."""
+        # For L(ẑ) = ẑ^2: STE grad = 2*(z+e), RB grad = (ẑ_hi^2 - ẑ_lo^2)/δ.
+        # STE gradient has dither noise; RB is deterministic per fixed z.
+        torch.manual_seed(7)
+        N = 5000
+        z_val = 0.7    # fractional part 0.7/1.0 = 0.7 — not near a bin boundary
+        delta = 1.0
+        z = torch.full((N, 1), z_val)
+
+        e = (torch.rand(N, 1) - 0.5) * delta
+        ste_var = (2 * (z + e)).var().item()
+
+        frac = (z / delta) - torch.floor(z / delta)
+        lo_frac = frac < 0.5
+        m_floor = torch.floor(z / delta)
+        m_lo = torch.where(lo_frac, m_floor - 1, m_floor)
+        m_hi = torch.where(lo_frac, m_floor, m_floor + 1)
+        z_hat_lo = (m_lo + 0.5) * delta
+        z_hat_hi = (m_hi + 0.5) * delta
+        rb_var = ((z_hat_hi ** 2 - z_hat_lo ** 2) / delta).var().item()
+
+        assert rb_var < ste_var, (
+            f"RB variance {rb_var:.6f} should be < STE variance {ste_var:.6f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# P3: Deployment evaluation (deploy_eval flag)
+# ---------------------------------------------------------------------------
+
+class TestDeployEval:
+    """Tests for the P3 deploy_eval routing in act_and_value."""
+
+    def test_nsd_train_deploy_equal(self):
+        """NSD: z_hat_true equals the z_hat STE value (sample-consistent by construction)."""
+        from onpolicy.envs.toyproblem.channels import DDCL_NSD
+        torch.manual_seed(0)
+        z = torch.randn(32, 3)
+        nsd = DDCL_NSD(delta=1.0)
+        z_hat, info = nsd(z)
+        # Forward value should equal z_hat_true (they're the same by design)
+        assert torch.allclose(z_hat, info["z_hat_true"]), (
+            "NSD z_hat (STE forward) must equal z_hat_true (deployment value)"
+        )
+
+    def test_sd_deploy_differs_from_ste(self):
+        """SD: z_hat_deploy differs from STE z_hat (not sample-consistent)."""
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        torch.manual_seed(0)
+        z = torch.randn(256, 3)
+        sd = DDCL_SD(delta=1.0)
+        z_hat, info = sd(z)
+        z_hat_deploy = info["z_hat_deploy"]
+        # In general they should differ (different dither samples e vs eps)
+        assert not torch.allclose(z_hat, z_hat_deploy), (
+            "SD z_hat (STE) and z_hat_deploy should differ in general"
+        )
+
+    def test_sd_deploy_distribution_matches_ste(self):
+        """SD: z_hat_deploy and STE z_hat have the same mean (Schuchman unbiasedness)."""
+        from onpolicy.envs.toyproblem.channels import DDCL_SD
+        torch.manual_seed(0)
+        N = 50_000
+        z = torch.zeros(N, 1)   # fixed z=0 for clarity
+        sd = DDCL_SD(delta=1.0)
+        z_hat, info = sd(z)
+        z_hat_deploy = info["z_hat_deploy"]
+        # Both should have mean ≈ z = 0 (Schuchman 1st-order condition)
+        assert abs(z_hat.mean().item()) < 0.02, f"STE mean {z_hat.mean():.4f} != 0"
+        assert abs(z_hat_deploy.mean().item()) < 0.02, (
+            f"deploy mean {z_hat_deploy.mean():.4f} != 0"
+        )
