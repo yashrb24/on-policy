@@ -40,3 +40,5 @@ Running 2 at a time.  Master log: /Users/user/Desktop/Research_Projects/DDCL unl
 [19/35] launch  p1_heuristic_delta  seed=3
 [18/35] done    p1_heuristic_delta  seed=2  exit=0
 [20/35] launch  p1_heuristic_delta  seed=4
+[19/35] done    p1_heuristic_delta  seed=3  exit=0
+[21/35] launch  p4_ste_baseline  seed=0
