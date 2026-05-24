@@ -1,0 +1,115 @@
+# WandB sweep for vanilla MAPPO/RMAPPO on Pursuit with transformer actor + transformer critic.
+# Vanilla here means no learned comms channel and no fake quantization.
+#
+# SCoUT (arXiv:2603.04833) does not report a directly comparable transformer actor+critic
+# MAPPO parameter count, but it gives useful anchors for Pursuit: 4M env steps, horizon 500,
+# recurrent hidden size 64, lr 3e-4, PPO clip 0.2, value loss coefficient 0.5,
+# gamma 0.99, GAE lambda 0.95, 8 PPO epochs, max grad norm 1.0,
+# and a smallest reported scale of 20P-8E.
+# Local smoke tests on a 20-thread i7-12700 + RTX 4060 Ti selected 48 rollout threads:
+# 64 rollout threads was slower for env stepping and OOMed on the largest swept model.
+# Keep seed fixed during Bayesian search; evaluate top configs across seeds afterward.
+#
+# Approximate params for this repo's Pursuit obs_dim=147/action_dim=5 transformer actor+critic:
+#   n_embd=32, n_block=1 -> ~36k total
+#   n_embd=32, n_block=2 -> ~49k total
+#   n_embd=48, n_block=1 -> ~72k total
+#   n_embd=48, n_block=2 -> ~101k total
+#   n_embd=64, n_block=1 -> ~121k total
+#   n_embd=64, n_block=2 -> ~171k total
+#   n_embd=64, n_block=3 -> ~221k total
+#
+# 3-block/64-emb smoke reached ~14.4 GiB with one minibatch, but completed at
+# 8586 MiB sampled peak process VRAM with two minibatches.
+
+program: sweep_wrapper.py
+name: pursuit-transformer-ac-vanilla-mappo
+method: grid
+project: on-policy
+
+metric:
+  name: capture_rate
+  goal: maximize
+
+parameters:
+  env_name:
+    value: Pursuit
+  algorithm_name:
+    value: rmappo
+  pursuit_scale:
+    value: 20p8e
+  num_env_steps:
+    value: 4000000
+  episode_length:
+    value: 500
+  max_cycles:
+    value: 500
+  n_rollout_threads:
+    value: 48
+  n_eval_rollout_threads:
+    value: 4
+  use_eval:
+    value: false
+  eval_interval:
+    value: 480000
+  eval_episodes:
+    value: 32
+  save_interval:
+    value: 480000
+  log_interval:
+    value: 48000
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: on-policy
+  wandb_tags:
+    value: ["pursuit", "vanilla-mappo", "transformer-actor-critic", "no-comms", "no-fake-quant"]
+
+  use_transformer_base_actor:
+    value: true
+  use_transformer_base_critic:
+    value: true
+  use_comms_channel:
+    value: false
+  use_fake_quantization:
+    value: false
+  use_active_masks_in_transformer:
+    value: false
+
+  gamma:
+    value: 0.99
+  gae_lambda:
+    value: 0.95
+  data_chunk_length:
+    value: 50
+  use_linear_lr_decay:
+    value: false
+  use_popart:
+    value: false
+
+  lr:
+    values: [0.0001, 0.0003, 0.0005]
+  critic_lr:
+    value: 0.0003
+  entropy_coef:
+    values: [0.005, 0.01, 0.02]
+  value_loss_coef:
+    value: 0.5
+  clip_param:
+    value: 0.2
+  ppo_epoch:
+    values: [5, 8]
+  num_mini_batch:
+    value: 2
+  max_grad_norm:
+    value: 1.0
+
+  n_block:
+    values: [1, 2, 3]
+  n_embd:
+    values: [32, 48, 64]
+  n_head:
+    values: [2, 4]
+
+  seed:
+    value: 8
