@@ -25,6 +25,11 @@ class R_MAPPOPolicy:
         self.share_obs_space = cent_obs_space
         self.act_space = act_space
 
+        assert not args.use_transformer_base_critic or args.use_transformer_base_actor, (
+            "use_transformer_base_critic requires use_transformer_base_actor; "
+            "critic-only transformer is unsupported."
+        )
+
         self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
         self.critic = R_Critic(args, self.share_obs_space, self.device)
 

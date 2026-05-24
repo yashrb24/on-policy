@@ -268,31 +268,32 @@ class R_Critic(nn.Module):
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
 
-        # Reshape for transformer if needed
         if self.use_transformer_base_critic:
-            # collect phase, not getting data from generators
-            if not self.training:
+            if cent_obs.dim() == 2:
                 batch_size = cent_obs.shape[0]
-                # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
-                cent_obs_reshaped = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
-                critic_features = self.base(cent_obs_reshaped)
-                # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
-                critic_features = critic_features.reshape(batch_size, -1)
-            # training phase, getting data from generators
-            else:
-                critic_features = self.base(cent_obs)
+                if batch_size % self.num_agents != 0:
+                    raise ValueError(
+                        f"Transformer critic expected flattened batch divisible by num_agents={self.num_agents}, "
+                        f"got {batch_size} rows.")
+                cent_obs = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            elif cent_obs.dim() != 3:
+                raise ValueError(
+                    f"Transformer critic expected 2D flattened or 3D agent-preserved input, got {cent_obs.dim()}D.")
 
+            critic_features = self.base(cent_obs)
             critic_features = critic_features.reshape(-1, critic_features.shape[-1])
-        # not using transformer base, can proceed without any changes
         else:
             critic_features = self.base(cent_obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
 
-            if self.training:
+            if self.use_transformer_base_critic:
+                if masks.dim() == 3:
+                    masks = masks.reshape(-1, masks.shape[-1])
+                if rnn_states.dim() == 4:
+                    rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])
+            elif self.training:
                 masks = masks.reshape(-1, masks.shape[-1]) # num_rollout_threads * num_agents, 1
-                if self.use_transformer_base_critic:
-                    rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])  # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
 
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
 
