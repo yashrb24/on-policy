@@ -36,6 +36,10 @@ class R_MAPPO():
         self._use_naive_recurrent = args.use_naive_recurrent_policy
         self.use_transformer_base_actor = args.use_transformer_base_actor
         self.use_transformer_base_critic = args.use_transformer_base_critic
+        assert not self.use_transformer_base_critic or self.use_transformer_base_actor, (
+            "use_transformer_base_critic requires use_transformer_base_actor; "
+            "critic-only transformer is unsupported."
+        )
         self._use_max_grad_norm = args.use_max_grad_norm
         self._use_clipped_value_loss = args.use_clipped_value_loss
         self._use_huber_loss = args.use_huber_loss
@@ -137,11 +141,14 @@ class R_MAPPO():
         return_batch = check(return_batch).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
-        # Flatten agent dimension for transformer-based models
+        eval_active_masks_batch = active_masks_batch
+        loss_active_masks_batch = active_masks_batch
+
         if self.use_transformer_base_actor:
             old_action_log_probs_batch, adv_targ, value_preds_batch, return_batch = \
                 self._prepare_batch_for_transformer(old_action_log_probs_batch, adv_targ, 
                                                    value_preds_batch, return_batch)
+            loss_active_masks_batch = self._prepare_batch_for_transformer(active_masks_batch)
 
             if not self.use_transformer_base_critic:
                 share_obs_batch, rnn_states_critic_batch = \
@@ -155,7 +162,7 @@ class R_MAPPO():
                                                                               actions_batch, 
                                                                               masks_batch, 
                                                                               available_actions_batch,
-                                                                              active_masks_batch)
+                                                                              eval_active_masks_batch)
         # actor update
         imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
 
@@ -163,12 +170,9 @@ class R_MAPPO():
         surr2 = torch.clamp(imp_weights, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
 
         if self._use_policy_active_masks:
-            if self.use_transformer_base_actor:
-                active_masks_batch = self._prepare_batch_for_transformer(active_masks_batch)
-
             policy_action_loss = (-torch.sum(torch.min(surr1, surr2),
                                              dim=-1,
-                                             keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
+                                             keepdim=True) * loss_active_masks_batch).sum() / loss_active_masks_batch.sum()
         else:
             policy_action_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
 
@@ -192,7 +196,7 @@ class R_MAPPO():
         self.policy.actor_optimizer.step()
 
         # critic update
-        value_loss = self.cal_value_loss(values, value_preds_batch, return_batch, active_masks_batch)
+        value_loss = self.cal_value_loss(values, value_preds_batch, return_batch, loss_active_masks_batch)
 
         self.policy.critic_optimizer.zero_grad()
 

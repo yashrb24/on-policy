@@ -41,12 +41,13 @@ class PursuitEnv(gym.Env):
             shape=(self.obs_dim,),
             dtype=self._obs_dtype,
         )
-        share_obs_box = Box(
+        global_share_obs_box = Box(
             low=float(sample_obs.low.min()),
             high=float(sample_obs.high.max()),
             shape=(self.obs_dim * self.num_agents,),
             dtype=self._obs_dtype,
         )
+        share_obs_box = single_obs_box if getattr(args, "use_transformer_base_critic", False) else global_share_obs_box
         single_act = self.env.action_space(self.possible_agents[0])
 
         self.observation_space = [single_obs_box for _ in range(self.num_agents)]

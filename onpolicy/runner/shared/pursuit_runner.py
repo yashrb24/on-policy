@@ -16,11 +16,20 @@ class PursuitRunner(Runner):
     def __init__(self, config):
         super(PursuitRunner, self).__init__(config)
         self.env_infos = defaultdict(list)
+        self.use_transformer_base_critic = getattr(self.all_args, "use_transformer_base_critic", False)
 
         # Per-rollout-thread episode trackers
         self.episode_rewards = np.zeros(self.n_rollout_threads)
         self.episode_steps = np.zeros(self.n_rollout_threads, dtype=int)
         self.episodes_completed = 0
+
+    def _build_share_obs(self, obs):
+        if self.use_centralized_V and not self.use_transformer_base_critic:
+            share_obs = obs.reshape(self.n_rollout_threads, -1)
+            return np.broadcast_to(
+                np.expand_dims(share_obs, 1),
+                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
+        return obs
 
     def run(self):
         self.warmup()
@@ -109,13 +118,7 @@ class PursuitRunner(Runner):
     def warmup(self):
         obs = self.envs.reset()
 
-        if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
-        else:
-            share_obs = obs
+        share_obs = self._build_share_obs(obs)
 
         self.buffer.share_obs[0] = share_obs
         self.buffer.obs[0] = obs
@@ -176,13 +179,7 @@ class PursuitRunner(Runner):
         masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents, 1), dtype=np.float32)
 
-        if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
-            share_obs = np.broadcast_to(
-                np.expand_dims(share_obs, 1),
-                (self.n_rollout_threads, self.num_agents, share_obs.shape[-1]))
-        else:
-            share_obs = obs
+        share_obs = self._build_share_obs(obs)
 
         self.buffer.insert(
             share_obs=share_obs,
