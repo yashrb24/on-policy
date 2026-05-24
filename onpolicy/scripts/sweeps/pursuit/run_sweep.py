@@ -15,7 +15,7 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = "configs/sweep_config_transformer_ac_vanilla_mappo.yaml"
-DEFAULT_PROJECT = "on-policy"
+DEFAULT_PROJECT = "ddcl-applications"
 
 
 def _resolve_config_path(config_file):
