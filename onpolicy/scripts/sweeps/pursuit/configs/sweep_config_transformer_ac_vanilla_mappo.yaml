@@ -25,7 +25,7 @@
 program: sweep_wrapper.py
 name: pursuit-transformer-ac-vanilla-mappo
 method: grid
-project: on-policy
+project: ddcl-applications
 
 metric:
   name: capture_rate
@@ -61,7 +61,7 @@ parameters:
   user_name:
     value: yashrb
   wandb_name:
-    value: on-policy
+    value: ddcl-applications
   wandb_tags:
     value: ["pursuit", "vanilla-mappo", "transformer-actor-critic", "no-comms", "no-fake-quant"]
 
