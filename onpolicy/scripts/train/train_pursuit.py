@@ -132,18 +132,26 @@ def main(args):
         os.makedirs(str(run_dir))
 
     if all_args.use_wandb:
-        run = wandb.init(config=all_args,
-                         project=all_args.env_name,
-                         entity=all_args.user_name,
-                         notes=socket.gethostname(),
-                         name="-".join([
-                             all_args.algorithm_name,
-                             all_args.experiment_name,
-                             "seed" + str(all_args.seed)
-                         ]),
-                         dir=str(run_dir),
-                         job_type="training",
-                         reinit=True)
+        if wandb.run is not None:
+            print(f"Detected WandB sweep run: {wandb.run.id}")
+            wandb.config.update(vars(all_args), allow_val_change=True)
+            wandb.run.tags = all_args.wandb_tags
+            run = wandb.run
+        else:
+            run = wandb.init(config=all_args,
+                             project=all_args.wandb_name if all_args.wandb_name else all_args.env_name,
+                             entity=all_args.user_name,
+                             notes=socket.gethostname(),
+                             name="-".join([
+                                 all_args.algorithm_name,
+                                 all_args.experiment_name,
+                                 "seed" + str(all_args.seed)
+                             ]),
+                             group=f"{all_args.n_pursuers}P-{all_args.n_evaders}E",
+                             dir=str(run_dir),
+                             job_type="training",
+                             tags=all_args.wandb_tags,
+                             reinit=True)
     else:
         if not run_dir.exists():
             curr_run = 'run1'
@@ -197,7 +205,8 @@ def main(args):
         eval_envs.close()
 
     if all_args.use_wandb:
-        run.finish()
+        if wandb.run and wandb.run.sweep_id is None:
+            run.finish()
     else:
         runner.writter.export_scalars_to_json(str(runner.log_dir + '/summary.json'))
         runner.writter.close()
