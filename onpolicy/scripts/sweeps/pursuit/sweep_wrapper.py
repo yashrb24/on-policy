@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """WandB sweep wrapper for vanilla MAPPO/RMAPPO Pursuit transformer actor-critic runs."""
 
+import os
+import signal
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import wandb
@@ -12,6 +16,38 @@ REPO_ROOT = SCRIPT_DIR.parents[3]
 TRAIN_PATH = REPO_ROOT / "onpolicy" / "scripts" / "train"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(TRAIN_PATH))
+
+
+def _force_kill_descendants():
+    """SIGKILL every descendant of this process.
+
+    On crash, train_pursuit.main() never reaches envs.close(), so the 48
+    SubprocVecEnv worker processes are orphaned. They are daemon=True so Python
+    *should* SIGTERM them on shutdown, but if a worker is blocked inside
+    env.step() the SIGTERM is ignored until the call returns. Hard-killing the
+    whole subtree here guarantees the wandb agent's next run starts on a clean
+    GPU and clean CPU.
+    """
+    my_pid = os.getpid()
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-P", str(my_pid)], stderr=subprocess.DEVNULL
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+    for pid_str in out.split():
+        try:
+            os.kill(int(pid_str), signal.SIGKILL)
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+
+
+def _arm_hard_exit_watchdog(seconds, exit_code):
+    """If cleanup itself hangs (e.g. wandb.finish blocks), os._exit anyway."""
+    timer = threading.Timer(seconds, lambda: os._exit(exit_code))
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 PURSUIT_SCALES = {
@@ -135,14 +171,38 @@ def run_training():
     print(f"  lr={config.lr}, critic_lr={config.critic_lr}, ppo_epoch={config.ppo_epoch}")
     print(f"  num_mini_batch={config.num_mini_batch}, entropy_coef={config.entropy_coef}")
 
+    crashed = False
     try:
         main(args_list)
         print(f"Training completed successfully for run {run_id}")
-    except Exception as exc:
+    except BaseException as exc:
+        crashed = True
         print(f"Training failed with error: {exc}")
         import traceback
         traceback.print_exc()
-        raise
+
+    if crashed:
+        # Absolute deadline: if any cleanup step below hangs, hard-exit anyway
+        # so the wandb agent doesn't stall waiting on this child.
+        _arm_hard_exit_watchdog(30, 1)
+
+        _force_kill_descendants()
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        try:
+            if wandb.run is not None:
+                wandb.finish(exit_code=1)
+        except Exception:
+            pass
+
+        # Skip Python finalizers — torch CUDA destructors can deadlock here.
+        os._exit(1)
 
 
 if __name__ == "__main__":
