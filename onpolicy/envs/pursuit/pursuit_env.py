@@ -25,6 +25,9 @@ class PursuitEnv(gym.Env):
             x_size=self.x_size,
             y_size=self.y_size,
             max_cycles=self.max_cycles,
+            catch_reward=getattr(args, "catch_reward", 5.0),
+            tag_reward=getattr(args, "tag_reward", 0.01),
+            urgency_reward=getattr(args, "urgency_reward", -0.1),
         )
         # Trigger one reset so possible_agents and per-agent spaces are populated.
         self.env.reset()
