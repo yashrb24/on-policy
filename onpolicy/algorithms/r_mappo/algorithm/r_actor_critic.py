@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 from onpolicy.algorithms.utils.util import init, check
@@ -57,8 +58,15 @@ class R_Actor(nn.Module):
         obs_shape = get_shape_from_obs_space(obs_space)
 
         if self.use_transformer_base_actor:
-            # Actor always calculates communication metrics if communication channel is enabled
-            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True)
+            # Actor always calculates communication metrics if communication channel is enabled.
+            # Optionally decouple actor depth from the critic (asymmetric actor/critic): a shallow
+            # copy with n_block overridden leaves n_embd/hidden_size untouched, so RNN/act/buffer are
+            # unaffected and the n_embd==hidden_size invariant still holds.
+            actor_args = args
+            if getattr(args, 'actor_n_block', None) is not None and args.actor_n_block != args.n_block:
+                actor_args = copy.copy(args)
+                actor_args.n_block = args.actor_n_block
+            self.base = TransformerEncoderBase(actor_args, obs_shape, calc_comm_metrics=True)
         else:
             base = CNNBase if len(obs_shape) == 3 else MLPBase
             self.base = base(args, obs_shape)
@@ -235,8 +243,15 @@ class R_Critic(nn.Module):
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
         if self.use_transformer_base_critic:
-            # Critic never calculates communication metrics
-            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False)
+            # Critic never calculates communication metrics.
+            # Optionally decouple critic depth from the actor (fat critic / asymmetric capacity):
+            # a shallow copy with n_block overridden leaves n_embd/hidden_size untouched, so the
+            # critic RNN, v_out, and the shared buffer's rnn_states_critic are all unaffected.
+            critic_args = args
+            if getattr(args, 'critic_n_block', None) is not None and args.critic_n_block != args.n_block:
+                critic_args = copy.copy(args)
+                critic_args.n_block = args.critic_n_block
+            self.base = TransformerEncoderBase(critic_args, cent_obs_shape, calc_comm_metrics=False)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
             self.base = base(args, cent_obs_shape)
