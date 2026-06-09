@@ -36,7 +36,15 @@ class PursuitEnv(gym.Env):
         self.num_agents = len(self.possible_agents)
 
         sample_obs = self.env.observation_space(self.possible_agents[0])
-        self.obs_dim = int(np.prod(sample_obs.shape))
+        self._raw_obs_shape = tuple(sample_obs.shape)
+        # Optional SCoUT-style representation: drop the walls/boundary plane (channel 0 of the
+        # 7x7x3 window, mostly zeros in an open arena) -> 7x7x2 = 98-dim. Default off (147-dim).
+        self._drop_walls = bool(getattr(args, "pursuit_drop_walls_channel", False)) \
+            and len(self._raw_obs_shape) == 3 and self._raw_obs_shape[2] >= 2
+        if self._drop_walls:
+            self.obs_dim = int(self._raw_obs_shape[0] * self._raw_obs_shape[1] * (self._raw_obs_shape[2] - 1))
+        else:
+            self.obs_dim = int(np.prod(sample_obs.shape))
         self._obs_dtype = sample_obs.dtype
         single_obs_box = Box(
             low=float(sample_obs.low.min()),
@@ -66,7 +74,10 @@ class PursuitEnv(gym.Env):
             if v is None:
                 rows.append(np.zeros(self.obs_dim, dtype=np.float32))
             else:
-                rows.append(np.asarray(v, dtype=np.float32).reshape(-1))
+                arr = np.asarray(v, dtype=np.float32)
+                if self._drop_walls:
+                    arr = arr.reshape(self._raw_obs_shape)[:, :, 1:]
+                rows.append(arr.reshape(-1))
         return np.stack(rows, axis=0)
 
     def reset(self):
