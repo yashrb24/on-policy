@@ -26,3 +26,6 @@ logs
 *.so
 runs
 .claude
+# distillation teacher checkpoint (local only)
+c1_lam90_s12_models/
+onpolicy/scripts/distill/data/
