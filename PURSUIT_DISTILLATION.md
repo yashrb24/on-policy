@@ -124,6 +124,24 @@ is genuinely hard to cover offline (not the case here).
 
 ---
 
+### Robustness (multi-seed, 3 seeds each = fresh init + train/val split)
+- **w8b2 (2,425 params): 100/100 on all 3 seeds.** **w6b1 (1,377): 100/100 on all 3 seeds.**
+  The "perfect capture at 1–2k params" headline is robust, not single-seed luck.
+- **w4b1 (889, cliff edge): seed-variable** — 98.1/85, 81.2/40, 99.4/95 across seeds. Right at the
+  capacity cliff the model is *barely* large enough, so a good fit depends on init luck; above the
+  cliff (≥1,377 params) it is deterministically perfect across seeds.
+- DAgger control `dagger_w2b2` (541 + teacher mixing, 20 rounds): 4.4 Catch / 0 Done — unchanged
+  from its BC baseline. The wall holds even with on-policy data.
+
+## Summary of the curve (offline BC, sampled 20-seed Catch%/Done%)
+```
+params:  107721  82505  48105  22921  13785   6953   4401   2425   1961   1377    889    765    541
+            (T)                                                                    cliff→  break  collapse
+Catch%:   100    100    100    100   99.4    100    100    100    100    100   ~93*   63.1    0.6
+Done%:    100    100    100    100     95    100    100    100    100    100   ~73*    0      0
+```
+\*w4b1 (889) is the seed-variable cliff edge (mean of 3 seeds). Perfect & robust ≥1,377; breaks <800.
+
 ## Reproduce
 ```bash
 # collect (once)
@@ -137,8 +155,14 @@ bash onpolicy/scripts/distill/eval_student.sh dst_w8b2 8 2 <gpu> <model_dir> 20
 Infra: anjuna2 uses `/usr/bin/python3`; anjuna3's `/usr/bin/python3` lacks deps — use its
 `.venv/bin/python` (set `PYTHON=`). Training a student = ~45–70s for 40 epochs on a 4060 Ti.
 
-## Open questions / next steps
-1. Locate the exact capacity wall (waves 3–4) and whether DAgger pushes below it.
-2. Multi-seed confirmation of the smallest working size (rule out single-seed luck).
-3. The real lever for matching SCoUT *from scratch* is optimization, not capacity — distillation
-   shows a tiny actor CAN represent the policy; reaching it via RL is the open problem.
+## What this establishes & open questions
+- **Capacity is not the bottleneck at SCoUT scale.** A transformer actor of **~1,377 params
+  (35× smaller than SCoUT's 39k) fully represents** this 20-pursuer coordination policy, robustly
+  across seeds; even ~900 params nearly does. The wall is ~800 params and is a *real* capacity
+  limit (DAgger / on-policy data does not cross it).
+- **So SCoUT's lower from-scratch numbers are an optimization/exploration/algorithm gap, not a
+  representational one.** The open problem is reaching this tiny-actor solution *via RL from
+  scratch* (distillation shows the target exists; RL must find it under sparse reward).
+- Done this run: full param sweep (107k→500), the wall, multi-seed robustness, DAgger control.
+- Not yet: distill from a different teacher seed (generalization across teachers); whether a
+  BC-initialized tiny actor + short RL fine-tune trains stably (BC as an RL initializer).
