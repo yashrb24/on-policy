@@ -100,17 +100,27 @@ near-random. So a transformer actor with **<1.4k params fully represents this 20
 coordination policy** — and even ~900 params nearly does. (For reference: SCoUT's actor is 39,195;
 the cliff is ~50× smaller.)
 
-### Stage B — does on-policy DAgger push below the BC cliff?
-Running: warm-start DAgger from the BC checkpoints right at/under the cliff — `dagger_w3b2`
-(765 params, BC=63/0) and `dagger_w2b2` (541 params, BC=0.6/0, with teacher action-mixing
-beta 0.7→0). Question: can on-policy data (student's own state distribution, teacher relabels)
-recover capture where offline BC fails? *(Results appended below.)*
+### Stage B — does on-policy DAgger push below the BC cliff? **No — the cliff is a real capacity wall.**
+Warm-start DAgger from the BC checkpoint at the cliff: `dagger_w3b2` (765 params, BC=63.1/0),
+15 rounds × 48 episodes, pure student rollout (beta=0), teacher relabels. **Result: no recovery.**
+Rollout-catch stayed flat at ~58–62% every round (never climbed), train_KL floored at ~0.50
+(vs BC's ~0.46), and the final sampled eval is **66.9±15.3 Catch / 5 Done — statistically the
+same as its BC baseline.** On-policy data cannot help because the failure is not distribution
+shift (which states the student visits) but **representational capacity** (a 765-param function
+class simply cannot fit the teacher's distribution — KL floors regardless of the data).
 
-## Stage B — on-policy DAgger (validated)
+Implication: above ~900 params offline BC already works (no distribution shift to fix); at/below
+~800 params *both* BC and on-policy DAgger fail. **So the ~800-param cliff is a genuine capacity
+wall, not an artifact of offline BC.** (`dagger_w2b2`, 541 params + teacher mixing, as the
+even-harder control — appended below.)
+
+## Stage B — on-policy DAgger
 `dagger_distill.py` validated end-to-end on anjuna2 (warm-start w24b2, 2 rounds, 29s, rollout
-catch 100%, KL 0.063→0.060). Planned use: at the BC wall, warm-start + DAgger to test whether
-on-policy data extends the compression frontier *below* where offline BC degrades. *(Results
-appended below.)*
+catch 100%, KL 0.063→0.060). Applied at the BC cliff (see "does on-policy DAgger push below the
+BC cliff?" above): it does **not** extend the frontier — the ~800-param cliff is a real capacity
+wall, so on-policy data cannot rescue it. Above the cliff offline BC already saturates, so DAgger
+adds nothing there either; its proper role would be a task where the teacher's state distribution
+is genuinely hard to cover offline (not the case here).
 
 ---
 
