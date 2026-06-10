@@ -132,12 +132,12 @@ def main(argv):
     A, obs_dim = act_space.n, obs_space.shape[0]
 
     teacher = R_Actor(all_args, obs_space, act_space, device=device)
-    teacher.load_state_dict(torch.load(os.path.join(all_args.teacher_model_dir, "actor.pt"), map_location=device))
+    teacher.load_state_dict(torch.load(os.path.join(all_args.teacher_model_dir, "actor.pt"), map_location=device, weights_only=False))
     teacher.eval()
 
     student = R_Actor(all_args, obs_space, act_space, device=device)
     if all_args.student_init_dir:
-        student.load_state_dict(torch.load(os.path.join(all_args.student_init_dir, "actor.pt"), map_location=device))
+        student.load_state_dict(torch.load(os.path.join(all_args.student_init_dir, "actor.pt"), map_location=device, weights_only=False))
         print(f"[dagger] warm-started student from {all_args.student_init_dir}")
     n_params = sum(p.numel() for p in student.parameters())
     print(f"[dagger] student params={n_params:,} n_embd={all_args.n_embd} n_block={all_args.n_block} "

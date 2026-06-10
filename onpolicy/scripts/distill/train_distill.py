@@ -141,7 +141,7 @@ def main(argv):
     print(f"[distill] obs_dim={obs_dim} action_dim={A} n_agents={M} device={device}")
 
     # data
-    blob = torch.load(all_args.data_path, map_location="cpu")
+    blob = torch.load(all_args.data_path, map_location="cpu", weights_only=False)
     episodes = blob["episodes"]
     meta = blob.get("meta", {})
     print(f"[distill] dataset: {len(episodes)} episodes  meta={meta}")

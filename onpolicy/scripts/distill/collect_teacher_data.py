@@ -64,7 +64,7 @@ def main(argv):
           f"hidden={H} recN={recN} device={device}")
 
     teacher = R_Actor(all_args, obs_space, act_space, device=device)
-    sd = torch.load(os.path.join(all_args.teacher_model_dir, "actor.pt"), map_location=device)
+    sd = torch.load(os.path.join(all_args.teacher_model_dir, "actor.pt"), map_location=device, weights_only=False)
     teacher.load_state_dict(sd)
     teacher.eval()
 
