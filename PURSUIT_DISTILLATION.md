@@ -74,13 +74,37 @@ KL. All students distilled from the **same** 600-episode dataset (offline BC, 40
 | dst_w8b3 | 8 / 3 | 2,889 | 89.8% | 0.126 | 99.4±2.8 | 95 |
 | **dst_w8b2** | 8 / 2 | **2,425** | 89.7% | 0.134 | **100.0±0.0** | 100 | ← 6.2% of SCoUT's actor |
 
-Every student matches the teacher and beats SCoUT. `val_agree`/`val_KL` degrade smoothly with
-size, but sampled capture stays ~99–100% throughout — the policy is extremely compressible.
+Every student down to 2,425 params matches the teacher and beats SCoUT. Sampled capture stays
+~99–100% throughout even as `val_agree`/`val_KL` degrade — the policy is extremely compressible.
 
-### Capacity floor (sub-2.4k probe, in progress)
-Wave 3 (`w8b1`..`w4b1`, n_head 2) and wave 4 (`w3`/`w2`, n_head 1) push into the hundreds of
-params to locate the actual wall. `w8b1` = **1,961 params** trains to 89.4% agree. *(Catch%
-for these pending eval — appended below.)*
+### The capacity wall (sub-2.4k, n_head 2 / n_head 1)
+
+| student | n_embd/n_block | **params** | val_agree | val_KL | **Catch%** | **Done%** |
+|---|---|---|---|---|---|---|
+| dst_w8b1 | 8 / 1 | 1,961 | 89.4% | 0.135 | 100.0±0.0 | 100 |
+| dst_w6b3 | 6 / 3 | 1,929 | 88.1% | 0.168 | 99.4±2.8 | 95 |
+| dst_w6b2 | 6 / 2 | 1,653 | 88.2% | 0.164 | 100.0±0.0 | 100 |
+| **dst_w6b1** | 6 / 1 | **1,377** | 87.6% | 0.175 | **100.0±0.0** | 100 | ← smallest that is still PERFECT |
+| dst_w4b3 | 4 / 3 | 1,161 | 85.4% | 0.254 | 96.9±9.0 | 85 |
+| dst_w4b2 | 4 / 2 | 1,025 | 84.3% | 0.273 | 96.9±6.9 | 75 |
+| dst_w4b1 | 4 / 1 | 889 | 85.4% | 0.238 | 98.1±4.6 | 85 |
+| dst_w3b2 | 3 / 2 | 765 | 74.0% | 0.459 | 63.1±17.0 | 0 |  ← cliff
+| dst_w3b1 | 3 / 1 | 681 | 73.6% | 0.470 | 61.9±21.3 | 5 |
+| dst_w2b2 | 2 / 2 | 541 | 39.2% | 1.111 | 0.6±2.8 | 0 |  ← collapsed
+| dst_w2b1 | 2 / 1 | 497 | 39.0% | 1.066 | 4.4±7.3 | 0 |
+
+**The capability cliff for offline BC is ~800 params.** Down to ~1,377 params (w6b1) capture is
+perfect (100/100); the w4 family (889–1,161) holds ~97–98% Catch but starts missing the last
+1–2 evaders (Done 75–85%); below ~765 it breaks (63% Catch, 0% Done) and by ~500 it collapses to
+near-random. So a transformer actor with **<1.4k params fully represents this 20-agent
+coordination policy** — and even ~900 params nearly does. (For reference: SCoUT's actor is 39,195;
+the cliff is ~50× smaller.)
+
+### Stage B — does on-policy DAgger push below the BC cliff?
+Running: warm-start DAgger from the BC checkpoints right at/under the cliff — `dagger_w3b2`
+(765 params, BC=63/0) and `dagger_w2b2` (541 params, BC=0.6/0, with teacher action-mixing
+beta 0.7→0). Question: can on-policy data (student's own state distribution, teacher relabels)
+recover capture where offline BC fails? *(Results appended below.)*
 
 ## Stage B — on-policy DAgger (validated)
 `dagger_distill.py` validated end-to-end on anjuna2 (warm-start w24b2, 2 rounds, 29s, rollout
