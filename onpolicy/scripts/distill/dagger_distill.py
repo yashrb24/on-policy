@@ -19,6 +19,7 @@ the student actor.pt, evaluated with the sampled SCoUT protocol.
 """
 import os
 import sys
+import copy
 import time
 import numpy as np
 import torch
@@ -54,15 +55,15 @@ def make_batches(episodes, batch_eps, rng):
 
 
 @torch.no_grad()
-def rollout_relabel(student, teacher, envs, n_ep, M, recN, H, A, device, beta=0.0, rng=None):
+def rollout_relabel(student, teacher, envs, n_ep, M, recN, H_s, H_t, A, device, beta=0.0, rng=None):
     """Student acts (its own state distribution); teacher relabels each visited state.
-    Returns a list of (obs float32 (L,M,obs), teacher_logp float16 (L,M,A)) episodes,
-    plus mean teacher catch fraction over finished episodes (a free sampled-eval signal)."""
-    N = envs.num_envs if hasattr(envs, "num_envs") else None
+    Student and teacher have DIFFERENT hidden sizes (H_s vs H_t). Returns a list of
+    (obs float32 (L,M,obs), teacher_logp float16 (L,M,A)) episodes, plus mean student
+    catch fraction over finished episodes (a free sampled-eval signal)."""
     obs = envs.reset()
     N = obs.shape[0]
-    s_rnn = np.zeros((N, M, recN, H), dtype=np.float32)
-    t_rnn = np.zeros((N, M, recN, H), dtype=np.float32)
+    s_rnn = np.zeros((N, M, recN, H_s), dtype=np.float32)
+    t_rnn = np.zeros((N, M, recN, H_t), dtype=np.float32)
     masks = np.ones((N, M, 1), dtype=np.float32)
     ep_obs = [[] for _ in range(N)]
     ep_lp = [[] for _ in range(N)]
@@ -79,8 +80,8 @@ def rollout_relabel(student, teacher, envs, n_ep, M, recN, H, A, device, beta=0.
             act = s_act
         t_lp = t_logits.detach().cpu().numpy().reshape(N, M, A)       # teacher target on student-visited state
         act_np = act.detach().cpu().numpy().reshape(N, M, 1)
-        s_rnn = s_rnn_new.detach().cpu().numpy().reshape(N, M, recN, H)
-        t_rnn = t_rnn_new.detach().cpu().numpy().reshape(N, M, recN, H)
+        s_rnn = s_rnn_new.detach().cpu().numpy().reshape(N, M, recN, H_s)
+        t_rnn = t_rnn_new.detach().cpu().numpy().reshape(N, M, recN, H_t)
         for i in range(N):
             ep_obs[i].append(np.asarray(obs[i], dtype=np.float32))
             ep_lp[i].append(t_lp[i])
@@ -104,6 +105,10 @@ def main(argv):
     parser = get_config()
     parser.add_argument("--teacher_model_dir", type=str, required=True)
     parser.add_argument("--student_init_dir", type=str, default=None, help="BC checkpoint dir to warm-start from")
+    # teacher architecture (independent of the student arch flags) -- must match the teacher checkpoint
+    parser.add_argument("--teacher_n_embd", type=int, default=64)
+    parser.add_argument("--teacher_n_block", type=int, default=3)
+    parser.add_argument("--teacher_n_head", type=int, default=4)
     parser.add_argument("--dagger_rounds", type=int, default=10)
     parser.add_argument("--episodes_per_round", type=int, default=48)
     parser.add_argument("--train_epochs_per_round", type=int, default=8)
@@ -126,12 +131,20 @@ def main(argv):
     np.random.seed(all_args.seed)
     rng = np.random.RandomState(all_args.seed)
 
-    M, recN, H = all_args.n_pursuers, all_args.recurrent_N, all_args.hidden_size
+    M, recN = all_args.n_pursuers, all_args.recurrent_N
+    H_s = all_args.hidden_size                      # student hidden
+    H_t = all_args.teacher_n_embd                   # teacher hidden (independent arch)
     envs = make_train_env(all_args)
     obs_space, act_space = envs.observation_space[0], envs.action_space[0]
     A, obs_dim = act_space.n, obs_space.shape[0]
 
-    teacher = R_Actor(all_args, obs_space, act_space, device=device)
+    # teacher built with its OWN architecture (not the student's CLI flags)
+    teacher_args = copy.copy(all_args)
+    teacher_args.n_embd = all_args.teacher_n_embd
+    teacher_args.hidden_size = all_args.teacher_n_embd
+    teacher_args.n_block = all_args.teacher_n_block
+    teacher_args.n_head = all_args.teacher_n_head
+    teacher = R_Actor(teacher_args, obs_space, act_space, device=device)
     teacher.load_state_dict(torch.load(os.path.join(all_args.teacher_model_dir, "actor.pt"), map_location=device, weights_only=False))
     teacher.eval()
 
@@ -159,7 +172,7 @@ def main(argv):
         beta = all_args.beta_start + (all_args.beta_end - all_args.beta_start) * (r - 1) / max(1, all_args.dagger_rounds - 1)
         student.eval()
         fresh, catch = rollout_relabel(student, teacher, envs, all_args.episodes_per_round,
-                                       M, recN, H, A, device, beta=beta, rng=rng)
+                                       M, recN, H_s, H_t, A, device, beta=beta, rng=rng)
         buffer.extend(fresh)
         if len(buffer) > all_args.aggregate_cap:
             buffer = buffer[-all_args.aggregate_cap:]
@@ -170,7 +183,7 @@ def main(argv):
             ek, es = 0.0, 0
             for chunk in make_batches(buffer, all_args.distill_batch_episodes, rng):
                 obs_flat, tgt_flat, mask_flat, B = build_batch(chunk, M, obs_dim, A, device)
-                rnn0 = torch.zeros(B * M, recN, H, device=device)
+                rnn0 = torch.zeros(B * M, recN, H_s, device=device)
                 Lmax = obs_flat.shape[0] // (B * M)
                 gru_masks = torch.ones(Lmax * B * M, 1, device=device)
                 log_s, _ = student.forward_logits(obs_flat, rnn0, gru_masks)
