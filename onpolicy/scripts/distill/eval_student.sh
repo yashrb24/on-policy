@@ -5,7 +5,8 @@
 set -euo pipefail
 EXP=$1; N_EMBD=$2; N_BLOCK=$3; GPU=$4; MODEL_DIR=$5; NSEEDS=${6:-20}
 cd "$(dirname "$0")/../../.."   # repo root
-CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH=$PWD /usr/bin/python3 onpolicy/scripts/train/eval_pursuit_seeds.py \
+PY=${PYTHON:-/usr/bin/python3}
+CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH=$PWD $PY onpolicy/scripts/train/eval_pursuit_seeds.py \
   --env_name Pursuit --algorithm_name rmappo --experiment_name "$EXP" \
   --n_pursuers 20 --n_evaders 8 --x_size 40 --y_size 40 --max_cycles 500 --episode_length 500 \
   --n_head 4 --n_block "$N_BLOCK" --n_embd "$N_EMBD" --hidden_size "$N_EMBD" \

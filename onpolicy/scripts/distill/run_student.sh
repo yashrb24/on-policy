@@ -6,7 +6,8 @@ set -euo pipefail
 EXP=$1; N_EMBD=$2; N_BLOCK=$3; GPU=$4; DATA=$5
 EPOCHS=${6:-40}; LR=${7:-5e-4}; BATCH=${8:-8}
 cd "$(dirname "$0")/../../.."   # repo root
-CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH=$PWD /usr/bin/python3 onpolicy/scripts/distill/train_distill.py \
+PY=${PYTHON:-/usr/bin/python3}   # anjuna3: PYTHON=.venv/bin/python (its /usr/bin/python3 lacks deps)
+CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH=$PWD $PY onpolicy/scripts/distill/train_distill.py \
   --env_name Pursuit --algorithm_name rmappo --experiment_name "$EXP" \
   --n_pursuers 20 --n_evaders 8 --x_size 40 --y_size 40 --max_cycles 500 --episode_length 500 \
   --catch_reward 5.0 --tag_reward 0.0 --urgency_reward 0.0 \
