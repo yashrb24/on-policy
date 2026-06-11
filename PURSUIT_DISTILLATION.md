@@ -39,6 +39,12 @@ documented "deterministic" eval is actually sampled). Consequences, both load-be
 - All eval below uses **sampling** (`eval_student.sh` passes `--eval_deterministic`).
 - Distillation targets the **full softmax distribution (KL)**, not hard argmax labels — argmax
   BC would discard the very stochasticity the policy relies on.
+- **This matches SCoUT's own protocol (verified from source, 2026-06-11, `github.com/scout-comm/scout`):**
+  their only eval fn `run_eval` defaults to `stochastic=True`, every call site samples
+  (`Categorical(logits=...).sample()`), and there is no deterministic/argmax eval path wired up (the
+  argmax branch is dead code; no config knob). So sampled eval is **apples-to-apples with SCoUT**, not
+  a deviation. (Caveat: the included `run_eval` is Battle-flavored — the exact Pursuit Catch%/Done%
+  runner is not in the repo per their README — but the sample-at-eval convention is unambiguous.)
 
 ## Teacher & dataset
 
@@ -163,6 +169,18 @@ Infra: anjuna2 uses `/usr/bin/python3`; anjuna3's `/usr/bin/python3` lacks deps 
 - **So SCoUT's lower from-scratch numbers are an optimization/exploration/algorithm gap, not a
   representational one.** The open problem is reaching this tiny-actor solution *via RL from
   scratch* (distillation shows the target exists; RL must find it under sparse reward).
+- **Scope / fairness caveat (read before comparing to from-scratch methods).** The distilled
+  students are a **representation + deployment** result, *not* a training-method comparison. A tiny
+  student scoring 100/100 shows the policy can be **represented and cheaply deployed** at ~1.4k
+  params; it does **not** show that the same architecture *trained from scratch* would reach it —
+  representational capacity ≠ trainability (cf. the lottery-ticket finding that pruned subnetworks
+  usually can't be retrained from scratch without the original init, and that overparameterization
+  aids optimization even when the final function is simple). So the **student rows are not
+  apples-to-apples with from-scratch methods** (SCoUT et al.) — they speak to compression/deployment
+  and to representational headroom, *not* to "we beat SCoUT with a tiny model." The legitimate
+  method comparison is **teacher (107,721 params, trained from scratch) vs SCoUT**, and even that is
+  confounded (our actor is 2.7× theirs + a different architecture). A *fair* small-model claim would
+  require training the small architecture from scratch with RL (the BC-initializer experiment below).
 - Done this run: full param sweep (107k→500), the wall, multi-seed robustness, DAgger control.
 - Not yet: distill from a different teacher seed (generalization across teachers); whether a
   BC-initialized tiny actor + short RL fine-tune trains stably (BC as an RL initializer).
