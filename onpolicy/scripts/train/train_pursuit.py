@@ -70,6 +70,12 @@ def parse_args(args, parser):
                         help="Pursuit grid height")
     parser.add_argument('--max_cycles', type=int, default=500,
                         help="Max cycles per episode in pursuit_v4 (align with --episode_length)")
+    parser.add_argument('--catch_reward', type=float, default=5.0,
+                        help="Reward to each catcher when an evader is surrounded/removed")
+    parser.add_argument('--tag_reward', type=float, default=0.01,
+                        help="Reward for tagging (touching) an evader. PZ default 0.01; SCoUT paper 0.0")
+    parser.add_argument('--urgency_reward', type=float, default=-0.1,
+                        help="Per-step reward added to each pursuer. PZ default -0.1; SCoUT paper 0.0")
     parser.add_argument("--eval_deterministic", action="store_false",
                         default=True,
                         help="by default True. If False, sample action according to probability")
