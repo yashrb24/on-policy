@@ -7,6 +7,7 @@
 *.pdf
 *.md
 !changes.md
+!experiment_logs/**/*.md
 __pycache__
 results
 *.pyc
@@ -25,3 +26,5 @@ logs
 *.so
 runs
 .claude
+# trained-seed checkpoint binaries (archived under experiment_logs; keep manifests only)
+*.pt

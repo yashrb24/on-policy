@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 from onpolicy.algorithms.utils.util import init, check
@@ -57,8 +58,13 @@ class R_Actor(nn.Module):
         obs_shape = get_shape_from_obs_space(obs_space)
 
         if self.use_transformer_base_actor:
-            # Actor always calculates communication metrics if communication channel is enabled
-            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True)
+            # Actor always calculates communication metrics if communication channel is enabled.
+            # Optional asymmetric depth 
+            actor_args = args
+            if args.actor_n_block is not None and args.actor_n_block != args.n_block:
+                actor_args = copy.copy(args)
+                actor_args.n_block = args.actor_n_block
+            self.base = TransformerEncoderBase(actor_args, obs_shape, calc_comm_metrics=True)
         else:
             base = CNNBase if len(obs_shape) == 3 else MLPBase
             self.base = base(args, obs_shape)
@@ -235,8 +241,13 @@ class R_Critic(nn.Module):
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
         if self.use_transformer_base_critic:
-            # Critic never calculates communication metrics
-            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False)
+            # Critic never calculates communication metrics.
+            # Optional asymmetric depth 
+            critic_args = args
+            if args.critic_n_block is not None and args.critic_n_block != args.n_block:
+                critic_args = copy.copy(args)
+                critic_args.n_block = args.critic_n_block
+            self.base = TransformerEncoderBase(critic_args, cent_obs_shape, calc_comm_metrics=False)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
             self.base = base(args, cent_obs_shape)

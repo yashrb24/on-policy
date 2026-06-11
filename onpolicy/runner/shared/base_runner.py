@@ -90,7 +90,11 @@ class Runner(object):
             self.trainer = TrainAlgo(self.all_args, self.policy, self.num_agents, device = self.device)
         else:
             self.trainer = TrainAlgo(self.all_args, self.policy, device = self.device)
-        
+
+        # value_normalizer lives on the trainer; restore() runs before the trainer exists.
+        if self.model_dir is not None:
+            self.restore_value_normalizer(self.model_dir)
+
         # buffer
         self.buffer = SharedReplayBuffer(self.all_args,
                                         self.num_agents,
@@ -155,6 +159,12 @@ class Runner(object):
             torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor.pt")
             policy_critic = self.trainer.policy.critic
             torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
+            # Persist optimizer + value-normalizer state so a run can be resumed cleanly
+            torch.save(self.trainer.policy.actor_optimizer.state_dict(), str(self.save_dir) + "/actor_optimizer.pt")
+            torch.save(self.trainer.policy.critic_optimizer.state_dict(), str(self.save_dir) + "/critic_optimizer.pt")
+            if self.all_args.use_valuenorm and not self.all_args.use_popart \
+                    and getattr(self.trainer, "value_normalizer", None) is not None:
+                torch.save(self.trainer.value_normalizer.state_dict(), str(self.save_dir) + "/valuenorm.pt")
 
     def restore(self, model_dir):
         """Restore policy's networks from a saved model."""
@@ -166,6 +176,25 @@ class Runner(object):
             if not self.all_args.use_render:
                 policy_critic_state_dict = torch.load(str(self.model_dir) + '/critic.pt')
                 self.policy.critic.load_state_dict(policy_critic_state_dict)
+                # Restore optimizer state if present 
+                actor_opt_path = str(self.model_dir) + '/actor_optimizer.pt'
+                critic_opt_path = str(self.model_dir) + '/critic_optimizer.pt'
+                if os.path.exists(actor_opt_path):
+                    self.policy.actor_optimizer.load_state_dict(torch.load(actor_opt_path))
+                if os.path.exists(critic_opt_path):
+                    self.policy.critic_optimizer.load_state_dict(torch.load(critic_opt_path))
+
+    def restore_value_normalizer(self, model_dir):
+        """Restore the standalone ValueNorm running statistics, if saved.
+
+        Called after the trainer is built (the value_normalizer lives there).
+        and a no-op under PopArt (its normalizer is restored via critic.pt).
+        """
+        if self.algorithm_name == "mat" or self.algorithm_name == "mat_dec":
+            return
+        vn_path = str(model_dir) + '/valuenorm.pt'
+        if getattr(self.trainer, "value_normalizer", None) is not None and os.path.exists(vn_path):
+            self.trainer.value_normalizer.load_state_dict(torch.load(vn_path))
 
     def log_train(self, train_infos, total_num_steps):
         """
