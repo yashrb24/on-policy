@@ -98,6 +98,9 @@ class Runner(object):
                                         share_observation_space,
                                         self.envs.action_space[0])
 
+        # Per-update DDCL delta metrics; populated by train(), consumed by log_train().
+        self._delta_info = {}
+
     def run(self):
         """Collect training data, perform training updates, and evaluate policy."""
         raise NotImplementedError
@@ -136,7 +139,8 @@ class Runner(object):
     def train(self):
         """Train policies with data in buffer. """
         self.trainer.prep_training()
-        train_infos = self.trainer.train(self.buffer)      
+        result = self.trainer.train(self.buffer)
+        train_infos, self._delta_info = result
         self.buffer.after_update()
         return train_infos
 
@@ -172,6 +176,17 @@ class Runner(object):
                 wandb.log({k: v}, step=total_num_steps)
             else:
                 self.writter.add_scalars(k, {k: v}, total_num_steps)
+
+        # Log learnable delta values: one grouped chart per channel (key / out), per block
+        for k, v in self._delta_info.items():
+            if isinstance(v, torch.Tensor) and v.numel() > 1:
+                dim_dict = {f"d{i}": float(v[i]) for i in range(v.numel())}
+            else:
+                dim_dict = {"d0": float(v)}
+            if self.use_wandb:
+                wandb.log({k: dim_dict}, step=total_num_steps)
+            else:
+                self.writter.add_scalars(k, dim_dict, total_num_steps)
 
     def log_env(self, env_infos, total_num_steps):
         """

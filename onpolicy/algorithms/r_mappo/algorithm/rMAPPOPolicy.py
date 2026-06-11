@@ -124,21 +124,26 @@ class R_MAPPOPolicy:
         
         comm_loss = 0
         comm_bits = 0
-        
+        delta_metrics = {}
+
         if actor_comm_metrics is not None:
             comm_loss = actor_comm_metrics[0]
             comm_bits = actor_comm_metrics[1]
+            if len(actor_comm_metrics) > 2:
+                delta_metrics = actor_comm_metrics[2]
 
         # Store communication metrics for retrieval
-        self._comm_metrics = (comm_loss, comm_bits) if (comm_loss > 0 or comm_bits > 0) else None
-        
+        self._comm_metrics = (comm_loss, comm_bits, delta_metrics) if (comm_loss > 0 or comm_bits > 0) else None
+
         return values, action_log_probs, dist_entropy
-    
+
     def get_comm_metrics(self):
         """
         Get communication metrics from the last forward pass.
-        
-        :return comm_metrics: (tuple) (comm_loss, comm_bits) or None if no communication channel used.
+
+        :return comm_metrics: (tuple) (comm_loss, comm_bits, delta_metrics) or None.
+          delta_metrics is a dict keyed "block{i}_key_delta" / "block{i}_out_delta".
+          For fixed delta or no channel, delta_metrics is {}.
         """
         return getattr(self, '_comm_metrics', None)
 

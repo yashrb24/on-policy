@@ -347,6 +347,15 @@ def get_config():
                         help="Coefficient for communication channel loss (default: 0.001)")
     parser.add_argument("--ddcl_variation", type=str, default="new", choices=["old", "new"],
                         help="DDCL variation to use: 'old' (single noise) or 'new' (double noise + quantization)")
+    parser.add_argument("--channel", type=str, default=None,
+                        choices=["none", "sd", "tpdf", "async_sd", "ad"],
+                        help="Channel class: none/sd/tpdf/async_sd/ad. If omitted, derived from --ddcl_variation.")
+    parser.add_argument("--delta", type=float, default=None,
+                        help="Quantization step delta. If omitted, computed as 1/num_messages.")
+    parser.add_argument("--delta_learnable", action="store_true", default=False,
+                        help="Per-dimension learnable delta, shape (zdim,) via softplus.")
+    parser.add_argument("--delta_global_learnable", action="store_true", default=False,
+                        help="Global scalar learnable delta, shape (1,) via softplus.")
     parser.add_argument("--use_fake_quantization", action='store_true', default=False,
                         help="Whether to use fake quantization for communication channel")
     parser.add_argument("--quant_bits", type=int, default=8, help="Quantization bits for communication channel")

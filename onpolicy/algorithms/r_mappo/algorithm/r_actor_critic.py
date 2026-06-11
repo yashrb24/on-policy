@@ -176,7 +176,8 @@ class R_Actor(nn.Module):
                 actor_features, comm_metrics = base_output
             else:
                 actor_features = base_output
-            
+                comm_metrics = None
+
             actor_features = actor_features.reshape(-1, actor_features.shape[-1])  # num_rollout_threads * num_agents, action_feature_dim
         else:
             actor_features = self.base(obs)
