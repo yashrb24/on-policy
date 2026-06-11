@@ -140,6 +140,45 @@ class R_Actor(nn.Module):
 
         return actions, action_log_probs, rnn_states
 
+    def forward_logits(self, obs, rnn_states, masks, available_actions=None):
+        """Distillation hook: same data-flow as forward() but returns the full
+        categorical log-probs (FixedCategorical.logits) instead of a sampled action.
+        Discrete action space only; the RL path (forward/evaluate_actions) is untouched.
+
+        Handles both single-step rollout and whole-episode BPTT — RNNLayer dispatches
+        on whether obs.size(0) == rnn.size(0):
+          * single-step:  obs (B*M, obs_dim),   rnn (B*M, recN, H), masks (B*M, 1)
+          * sequence:     obs (T*B*M, obs_dim), rnn (B*M, recN, H), masks (T*B*M, 1)
+
+        :return: (logits (rows, action_dim) log-softmax, updated rnn_states)
+        """
+        if getattr(self.act, 'multi_discrete', False) or getattr(self.act, 'mixed_action', False):
+            raise NotImplementedError("forward_logits supports single Discrete action heads only.")
+
+        obs = check(obs).to(**self.tpdv)
+        rnn_states = check(rnn_states).to(**self.tpdv)
+        masks = check(masks).to(**self.tpdv)
+        if available_actions is not None:
+            available_actions = check(available_actions).to(**self.tpdv)
+
+        if self.use_transformer_base_actor:
+            batch_size = obs.shape[0]
+            obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            base_output = self.base(obs_reshaped)
+            if isinstance(base_output, tuple):
+                actor_features, _ = base_output
+            else:
+                actor_features = base_output
+            actor_features = actor_features.reshape(batch_size, -1)
+        else:
+            actor_features = self.base(obs)
+
+        if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+            actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+
+        action_logits = self.act.action_out(actor_features, available_actions)
+        return action_logits.logits, rnn_states
+
     def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
         """
         Compute log probability and entropy of given actions.

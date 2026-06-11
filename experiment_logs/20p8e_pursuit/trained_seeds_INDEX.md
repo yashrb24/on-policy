@@ -8,10 +8,11 @@ Checkpoints archived from the colva/anjuna2 nodes. SCoUT benchmark target: 20 pu
 |-------|-----:|------|-------------|
 | [`trained_seeds_lam90_big/`](trained_seeds_lam90_big/README.md) | 20 | full depth-3 actor (107k), the c12 lineage + distill teacher (s12) | sweep mean trail-10 ~93%; s12 held-out 100/100 |
 | [`trained_seeds_actor_shrink/`](trained_seeds_actor_shrink/README.md) | 8 | RL actor-depth shrink (depth-1 57k, depth-2 82k; critic fixed depth-3) | depth-1 6-seed mean 93.2/69.2; best s19 & s6 100/100 |
+| [`trained_seeds_distillation/`](trained_seeds_distillation/README.md) | 37 | BC/DAgger students distilled from teacher s12 | beats SCoUT down to 2,425 params; perfect to 1,377 (w6b1) |
 
 **Layout:** each run dir is a checkpoint (`actor.pt` always present; RL runs also have
 `critic.pt` + optimizers + `valuenorm.pt`). Load via `--model_dir <dir>`; eval needs only `actor.pt`.
 
 **Note:** the `.pt` binaries are gitignored (~71MB) — only these `.md` manifests are tracked. To
 re-pull binaries, the source paths are in each group's README. Reports:
-`PURSUIT_ACTOR_SHRINK_RESULTS.md`, `PURSUIT_LAMBDA090_SETUP.md` (here).
+`PURSUIT_ACTOR_SHRINK_RESULTS.md`, `PURSUIT_LAMBDA090_SETUP.md` (here); `PURSUIT_DISTILLATION.md` (anjuna2).
