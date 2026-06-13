@@ -268,3 +268,4 @@ class PursuitRunner(Runner):
             self.writter.add_scalars("eval_done_rate", {"eval_done_rate": eval_success}, total_num_steps)
             self.writter.add_scalars("eval_n_captures", {"eval_n_captures": eval_captures}, total_num_steps)
             self.writter.add_scalars("eval_capture_rate", {"eval_capture_rate": eval_capture_rate}, total_num_steps)
+            self.writter.add_scalars("eval_episodes", {"eval_episodes": len(eval_finished_captures)}, total_num_steps)
