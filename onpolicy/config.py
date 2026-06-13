@@ -353,6 +353,10 @@ def get_config():
                         help="Whether to use communication channel with noise in transformer encoder of actor")
     parser.add_argument("--use_active_masks_in_transformer", action='store_true', default=False,
                         help="Whether to pass active masks to transformer encoder (default: False)")
+    parser.add_argument("--comms_channel_actor_only", action="store_true", default=False,
+                        help="When use_comms_channel and a transformer critic are both on, apply the DDCL "
+                             "channel only in the actor; build the critic's transformer encoder with the "
+                             "channel disabled. Default off (channel in both actor and critic).")
     parser.add_argument("--num_messages", type=int, default=15,
                         help="Number of messages for communication channel quantization (default: 15)")
     parser.add_argument("--comm_coeff", type=float, default=0.0001,

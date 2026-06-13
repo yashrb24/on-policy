@@ -1,0 +1,129 @@
+# WandB sweep: Pursuit 20P-8E DDCL channel x granularization grid.
+#
+# Fixed hyperparameters are the log-confirmed lambda0.90 SHRUNK-ACTOR recipe, i.e. the
+# PURSUIT_LAMBDA090_SETUP.md launch command + --actor_n_block 1 --critic_n_block 3
+# (see experiment_logs/20p8e_pursuit/trained_seeds_actor_shrink/README.md). They are
+# pinned verbatim; do not "improve" them. Notably value_loss_coef=1 is the config.py
+# default the recipe relied on (NOT the 0.5 used by the vanilla sweep), and rewards are
+# the paper-sparse catch 5 / tag 0 / urgency 0 (train_pursuit defaults are 5 / 0.01 / -0.1).
+#
+# DDCL channel is enabled in the ACTOR ONLY (comms_channel_actor_only). Periodic held-out
+# eval runs 20 stochastic rollouts every 96000 steps (= 8 episodes at 500 x 24 = 12000
+# steps/episode; 100000 is not a multiple of 12000 so the exact-equality trigger would
+# never fire) and logs eval_capture_rate (Capture%) and eval_done_rate/eval_success (Done%).
+#
+# Grid: 4 channels x 4 delta_config x 4 comm_coeff x 3 seeds = 192 runs.
+
+program: sweep_wrapper_ddcl.py
+name: pursuit-20p8e-ddcl-delta-channels
+method: grid
+project: ddcl-applications
+
+metric:
+  name: capture_rate
+  goal: maximize
+
+parameters:
+  # Environment / scale
+  env_name:
+    value: Pursuit
+  algorithm_name:
+    value: rmappo
+  pursuit_scale:
+    value: 20p8e          # -> 20 pursuers / 8 evaders / 40x40
+  num_env_steps:
+    value: 4000000
+  episode_length:
+    value: 500
+  max_cycles:
+    value: 500
+  n_rollout_threads:
+    value: 24
+  n_training_threads:
+    value: 1
+
+  # Paper-sparse rewards
+  catch_reward:
+    value: 5.0
+  tag_reward:
+    value: 0.0
+  urgency_reward:
+    value: 0.0
+
+  # Optimization (lambda0.90 recipe)
+  lr:
+    value: 0.0003
+  critic_lr:
+    value: 0.0003
+  entropy_coef:
+    value: 0.001
+  ppo_epoch:
+    value: 8
+  num_mini_batch:
+    value: 1
+  clip_param:
+    value: 0.2
+  gamma:
+    value: 0.99
+  gae_lambda:
+    value: 0.90
+  max_grad_norm:
+    value: 1.0
+  value_loss_coef:
+    value: 1            # config.py default the recipe used; NOT 0.5
+
+  # Architecture: 1-block transformer actor + 3-block transformer critic
+  n_head:
+    value: 4
+  n_embd:
+    value: 64
+  hidden_size:
+    value: 64
+  n_block:
+    value: 3
+  actor_n_block:
+    value: 1
+  critic_n_block:
+    value: 3
+  data_chunk_length:
+    value: 50
+  use_transformer_base_actor:
+    value: true
+  use_transformer_base_critic:
+    value: true
+  pursuit_drop_walls_channel:
+    value: true          # obs98 (walls channel hidden)
+
+  # DDCL: channel in the actor only
+  use_comms_channel:
+    value: true
+  comms_channel_actor_only:
+    value: true
+
+  # Periodic held-out evaluation
+  use_eval:
+    value: true
+  eval_interval:
+    value: 96000         # multiple of episode_length * n_rollout_threads (500 * 24 = 12000)
+  n_eval_rollout_threads:
+    value: 20
+  eval_stochastic:
+    value: true          # wrapper passes --eval_deterministic (store_false) -> stochastic rollouts
+
+  # WandB
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: ddcl-applications
+  wandb_tags:
+    value: ["pursuit", "20p8e", "ddcl", "delta-channels", "actor1-critic3"]
+
+  # Swept axes
+  seed:
+    values: [8, 12, 18]
+  channel:
+    values: ["sd", "tpdf", "async_sd", "ad"]
+  delta_config:
+    values: ["fixed_10", "fixed_15", "learnable_global", "learnable_perdim"]
+  comm_coeff:
+    values: [0.0001, 0.0004, 0.0007, 0.001]

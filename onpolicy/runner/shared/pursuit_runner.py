@@ -252,14 +252,19 @@ class PursuitRunner(Runner):
         eval_captures = float(np.mean(eval_finished_captures)) if eval_finished_captures else 0.0
         eval_capture_rate = eval_captures / max(1, self.all_args.n_evaders)
 
+        # eval_success is the Done% (fraction of episodes capturing all evaders); log a clearly-named
+        # alias eval_done_rate alongside it. eval_capture_rate is the Capture%.
         if self.use_wandb:
             wandb.log({"eval_average_episode_rewards": eval_reward}, step=total_num_steps)
             wandb.log({"eval_success": eval_success}, step=total_num_steps)
+            wandb.log({"eval_done_rate": eval_success}, step=total_num_steps)
             wandb.log({"eval_n_captures": eval_captures}, step=total_num_steps)
             wandb.log({"eval_capture_rate": eval_capture_rate}, step=total_num_steps)
+            wandb.log({"eval_episodes": len(eval_finished_captures)}, step=total_num_steps)
         else:
             self.writter.add_scalars("eval_average_episode_rewards",
                                      {"eval_average_episode_rewards": eval_reward}, total_num_steps)
             self.writter.add_scalars("eval_success", {"eval_success": eval_success}, total_num_steps)
+            self.writter.add_scalars("eval_done_rate", {"eval_done_rate": eval_success}, total_num_steps)
             self.writter.add_scalars("eval_n_captures", {"eval_n_captures": eval_captures}, total_num_steps)
             self.writter.add_scalars("eval_capture_rate", {"eval_capture_rate": eval_capture_rate}, total_num_steps)
