@@ -86,9 +86,14 @@ def run_training():
         args_list.extend(['--num_messages', str(config.num_messages)])
     if hasattr(config, 'ddcl_variation'):
         args_list.extend(['--ddcl_variation', str(config.ddcl_variation)])
-
-    # Set CUDA device if needed
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    if hasattr(config, 'channel') and config.channel is not None:
+        args_list.extend(['--channel', str(config.channel)])
+    if hasattr(config, 'delta') and config.delta is not None:
+        args_list.extend(['--delta', str(config.delta)])
+    if getattr(config, 'delta_learnable', False):
+        args_list.append('--delta_learnable')
+    if getattr(config, 'delta_global_learnable', False):
+        args_list.append('--delta_global_learnable')
 
     print(f"Starting training with sweep config:")
     print(f"  lr={config.lr}, critic_lr={config.critic_lr}")

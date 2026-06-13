@@ -1,0 +1,87 @@
+# WandB Sweep Configuration for PredatorPrey Medium — DDCL Channels
+# delta_config encodes the 4 delta modes as a single string to avoid
+# illegal WandB grid combinations (delta_learnable and delta_global_learnable
+# are mutually exclusive; fixed delta only applies when both are false).
+#
+# delta_config values:
+#   fixed_10        -> --delta 0.1  (no learnable flags)
+#   fixed_15        -> --delta 0.0667  (no learnable flags)
+#   learnable_global  -> --delta_global_learnable  (single scalar)
+#   learnable_perdim  -> --delta_learnable  (one scalar per embedding dim)
+#
+# 4 channels x 4 delta_configs x 5 lambda x 3 seeds = 240 runs
+
+program: sweep_wrapper.py
+name: pp-medium-channels-delta-sweep
+method: grid
+project: ddcl-applications
+metric:
+  name: win_rate
+  goal: maximize
+
+parameters:
+  # Environment (medium difficulty)
+  env_name:
+    value: PredatorPrey
+  scenario_name:
+    value: medium
+  algorithm_name:
+    value: rmappo
+  num_agents:
+    value: 5
+  num_env_steps:
+    value: 3000000
+  episode_length:
+    value: 40
+  dim:
+    value: 10
+  vision:
+    value: 1
+  n_rollout_threads:
+    value: 15
+  save_interval:
+    value: 200
+  log_interval:
+    value: 400
+  user_name:
+    value: yashrb
+  wandb_name:
+    value: ddcl-applications
+
+  # Network (same as hard)
+  lr:
+    value: 0.0001
+  critic_lr:
+    value: 0.0001
+  entropy_coef:
+    value: 0.001
+  clip_param:
+    value: 0.2
+  n_block:
+    value: 2
+  n_embd:
+    value: 64
+  n_head:
+    value: 4
+  hidden_size:
+    value: 64
+  max_grad_norm:
+    value: 10.0
+  ppo_epoch:
+    value: 10
+  num_mini_batch:
+    value: 1
+
+  # DDCL always enabled for this sweep
+  use_comms_channel:
+    value: true
+
+  # Swept parameters
+  seed:
+    values: [8, 12, 18]
+  comm_coeff:
+    values: [0.0001, 0.0004, 0.0007, 0.001, 0.004]
+  channel:
+    values: ["sd", "tpdf", "async_sd", "ad"]
+  delta_config:
+    values: ["fixed_10", "fixed_15", "learnable_global", "learnable_perdim"]

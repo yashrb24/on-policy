@@ -175,7 +175,7 @@ class R_MAPPO():
         comm_metrics = self.policy.get_comm_metrics()
         comm_loss = 0
         if comm_metrics is not None:
-            comm_loss, _ = comm_metrics
+            comm_loss = comm_metrics[0]
 
         policy_loss = policy_action_loss
 
@@ -237,6 +237,8 @@ class R_MAPPO():
         train_info['comm_loss'] = 0
         train_info['comm_bits'] = 0
         train_info['actor_loss'] = 0
+        # delta_info: accumulated tensor sums keyed "block{i}_{key|out}_delta"; averaged at end
+        delta_info: dict = {}
 
         for _ in range(self.ppo_epoch):
             # Get appropriate data generator based on model configuration
@@ -270,12 +272,22 @@ class R_MAPPO():
                     train_info['comm_bits'] += comm_metrics[1].item() if torch.is_tensor(comm_metrics[1]) else comm_metrics[1]
                     train_info['actor_loss'] += self.comm_coef * comm_loss
 
+                    # Accumulate learnable delta tensors into delta_info
+                    raw_delta = comm_metrics[2] if len(comm_metrics) > 2 else {}
+                    for blk_key, val in raw_delta.items():
+                        if blk_key not in delta_info:
+                            delta_info[blk_key] = val.clone() if isinstance(val, torch.Tensor) else float(val)
+                        else:
+                            delta_info[blk_key] = delta_info[blk_key] + (val if isinstance(val, torch.Tensor) else float(val))
+
         num_updates = self.ppo_epoch * self.num_mini_batch
 
         for k in train_info.keys():
             train_info[k] /= num_updates
- 
-        return train_info
+        for k in delta_info.keys():
+            delta_info[k] = delta_info[k] / num_updates
+
+        return train_info, delta_info
 
     def prep_training(self):
         self.policy.actor.train()
