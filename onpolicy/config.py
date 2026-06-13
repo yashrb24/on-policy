@@ -329,6 +329,18 @@ def get_config():
     parser.add_argument("--n_block", type=int, default=1)
     parser.add_argument("--n_embd", type=int, default=64)
     parser.add_argument("--n_head", type=int, default=1)
+    parser.add_argument("--actor_n_block", type=int, default=None,
+                        help="If set, overrides n_block for the actor transformer ONLY "
+                             "(decoupled actor depth for asymmetric actor/critic). "
+                             "Default None = use n_block. n_embd is unchanged, so RNN/act/buffer are unaffected.")
+    parser.add_argument("--critic_n_block", type=int, default=None,
+                        help="If set, overrides n_block for the critic transformer ONLY "
+                             "(decoupled critic depth for asymmetric actor/critic). "
+                             "Default None = use n_block. n_embd is unchanged, so RNN/v_out/buffer are unaffected.")
+    parser.add_argument("--pursuit_drop_walls_channel", action='store_true', default=False,
+                        help="Pursuit obs: drop channel 0 (the walls/boundary plane, all-zeros in an "
+                             "open arena except near edges) from the 7x7x3 observation -> 7x7x2 = 98-dim, "
+                             "matching SCoUT's representation. Default off (full 147-dim).")
     parser.add_argument("--dec_actor", action='store_true', default=False)
     parser.add_argument("--share_actor", action='store_true', default=False)
 

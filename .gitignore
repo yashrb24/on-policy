@@ -7,6 +7,8 @@
 *.pdf
 *.md
 !changes.md
+!experiment_logs/**/*.md
+!PURSUIT_DISTILLATION.md
 __pycache__
 results
 *.pyc
@@ -25,3 +27,8 @@ logs
 *.so
 runs
 .claude
+# trained-seed checkpoint binaries (archived under experiment_logs; keep manifests only)
+*.pt
+# distillation teacher checkpoint + collected data (local only)
+c1_lam90_s12_models/
+onpolicy/scripts/distill/data/

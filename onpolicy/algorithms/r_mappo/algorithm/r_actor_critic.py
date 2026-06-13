@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 from onpolicy.algorithms.utils.util import init, check
@@ -57,8 +58,13 @@ class R_Actor(nn.Module):
         obs_shape = get_shape_from_obs_space(obs_space)
 
         if self.use_transformer_base_actor:
-            # Actor always calculates communication metrics if communication channel is enabled
-            self.base = TransformerEncoderBase(args, obs_shape, calc_comm_metrics=True)
+            # Actor always calculates communication metrics if communication channel is enabled.
+            # Optional asymmetric depth 
+            actor_args = args
+            if args.actor_n_block is not None and args.actor_n_block != args.n_block:
+                actor_args = copy.copy(args)
+                actor_args.n_block = args.actor_n_block
+            self.base = TransformerEncoderBase(actor_args, obs_shape, calc_comm_metrics=True)
         else:
             base = CNNBase if len(obs_shape) == 3 else MLPBase
             self.base = base(args, obs_shape)
@@ -133,6 +139,45 @@ class R_Actor(nn.Module):
         actions, action_log_probs = self.act(actor_features, available_actions, deterministic)
 
         return actions, action_log_probs, rnn_states
+
+    def forward_logits(self, obs, rnn_states, masks, available_actions=None):
+        """Distillation hook: same data-flow as forward() but returns the full
+        categorical log-probs (FixedCategorical.logits) instead of a sampled action.
+        Discrete action space only; the RL path (forward/evaluate_actions) is untouched.
+
+        Handles both single-step rollout and whole-episode BPTT — RNNLayer dispatches
+        on whether obs.size(0) == rnn.size(0):
+          * single-step:  obs (B*M, obs_dim),   rnn (B*M, recN, H), masks (B*M, 1)
+          * sequence:     obs (T*B*M, obs_dim), rnn (B*M, recN, H), masks (T*B*M, 1)
+
+        :return: (logits (rows, action_dim) log-softmax, updated rnn_states)
+        """
+        if getattr(self.act, 'multi_discrete', False) or getattr(self.act, 'mixed_action', False):
+            raise NotImplementedError("forward_logits supports single Discrete action heads only.")
+
+        obs = check(obs).to(**self.tpdv)
+        rnn_states = check(rnn_states).to(**self.tpdv)
+        masks = check(masks).to(**self.tpdv)
+        if available_actions is not None:
+            available_actions = check(available_actions).to(**self.tpdv)
+
+        if self.use_transformer_base_actor:
+            batch_size = obs.shape[0]
+            obs_reshaped = obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            base_output = self.base(obs_reshaped)
+            if isinstance(base_output, tuple):
+                actor_features, _ = base_output
+            else:
+                actor_features = base_output
+            actor_features = actor_features.reshape(batch_size, -1)
+        else:
+            actor_features = self.base(obs)
+
+        if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+            actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+
+        action_logits = self.act.action_out(actor_features, available_actions)
+        return action_logits.logits, rnn_states
 
     def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
         """
@@ -235,8 +280,13 @@ class R_Critic(nn.Module):
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
         if self.use_transformer_base_critic:
-            # Critic never calculates communication metrics
-            self.base = TransformerEncoderBase(args, cent_obs_shape, calc_comm_metrics=False)
+            # Critic never calculates communication metrics.
+            # Optional asymmetric depth 
+            critic_args = args
+            if args.critic_n_block is not None and args.critic_n_block != args.n_block:
+                critic_args = copy.copy(args)
+                critic_args.n_block = args.critic_n_block
+            self.base = TransformerEncoderBase(critic_args, cent_obs_shape, calc_comm_metrics=False)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
             self.base = base(args, cent_obs_shape)
@@ -268,31 +318,32 @@ class R_Critic(nn.Module):
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
 
-        # Reshape for transformer if needed
         if self.use_transformer_base_critic:
-            # collect phase, not getting data from generators
-            if not self.training:
+            if cent_obs.dim() == 2:
                 batch_size = cent_obs.shape[0]
-                # Reshape from (batch*agents, obs_dim) to (batch, agents, obs_dim)
-                cent_obs_reshaped = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
-                critic_features = self.base(cent_obs_reshaped)
-                # Reshape back from (batch, agents, hidden_dim) to (batch*agents, hidden_dim)
-                critic_features = critic_features.reshape(batch_size, -1)
-            # training phase, getting data from generators
-            else:
-                critic_features = self.base(cent_obs)
+                if batch_size % self.num_agents != 0:
+                    raise ValueError(
+                        f"Transformer critic expected flattened batch divisible by num_agents={self.num_agents}, "
+                        f"got {batch_size} rows.")
+                cent_obs = cent_obs.reshape(batch_size // self.num_agents, self.num_agents, -1)
+            elif cent_obs.dim() != 3:
+                raise ValueError(
+                    f"Transformer critic expected 2D flattened or 3D agent-preserved input, got {cent_obs.dim()}D.")
 
+            critic_features = self.base(cent_obs)
             critic_features = critic_features.reshape(-1, critic_features.shape[-1])
-        # not using transformer base, can proceed without any changes
         else:
             critic_features = self.base(cent_obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
 
-            if self.training:
+            if self.use_transformer_base_critic:
+                if masks.dim() == 3:
+                    masks = masks.reshape(-1, masks.shape[-1])
+                if rnn_states.dim() == 4:
+                    rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])
+            elif self.training:
                 masks = masks.reshape(-1, masks.shape[-1]) # num_rollout_threads * num_agents, 1
-                if self.use_transformer_base_critic:
-                    rnn_states = rnn_states.reshape(-1, rnn_states.shape[-2], rnn_states.shape[-1])  # num_rollout_threads * num_agents, num_recurrent_layers, hidden_size
 
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
 
