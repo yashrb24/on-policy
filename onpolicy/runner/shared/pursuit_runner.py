@@ -23,6 +23,14 @@ class PursuitRunner(Runner):
         self.episode_steps = np.zeros(self.n_rollout_threads, dtype=int)
         self.episodes_completed = 0
 
+        # Rollout-time breakdown accumulators (reset every log interval).
+        # collect() ends in .cpu() and train()/compute() read losses to host,
+        # so these wall-clock spans each include their CUDA sync -> meaningful.
+        self._t_collect = 0.0   # policy.get_actions forward (O(num_agents^2) attention)
+        self._t_envstep = 0.0   # SubprocVecEnv pipe/pickle barrier + pursuit sim
+        self._t_train = 0.0     # compute() + PPO update
+        self._timing_steps = 0  # inner-loop iterations since last reset
+
     def _build_share_obs(self, obs):
         if self.use_centralized_V and not self.use_transformer_base_critic:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
@@ -43,17 +51,26 @@ class PursuitRunner(Runner):
 
             for step in range(self.episode_length):
                 # Sample actions
+                t0 = time.time()
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env = self.collect(step)
+                t1 = time.time()
 
                 # Step envs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
+                t2 = time.time()
+
+                self._t_collect += t1 - t0
+                self._t_envstep += t2 - t1
+                self._timing_steps += 1
 
                 data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
                 self.insert(data)
 
             # compute return and update network
+            t3 = time.time()
             self.compute()
             train_infos = self.train()
+            self._t_train += time.time() - t3
 
             total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
 
@@ -73,6 +90,28 @@ class PursuitRunner(Runner):
                               total_num_steps,
                               self.num_env_steps,
                               int(total_num_steps / (end - start))))
+
+                # --- rollout-time breakdown: localize the bottleneck ---
+                n = max(self._timing_steps, 1)
+                rollout_t = self._t_collect + self._t_envstep
+                total_t = rollout_t + self._t_train
+                if total_t > 0:
+                    print("  [timing] collect/policy {:.1f}s ({:.0%}) | env.step {:.1f}s ({:.0%}) | "
+                          "train {:.1f}s ({:.0%})  ||  rollout {:.0%} vs train {:.0%}".format(
+                              self._t_collect, self._t_collect / total_t,
+                              self._t_envstep, self._t_envstep / total_t,
+                              self._t_train, self._t_train / total_t,
+                              rollout_t / total_t, self._t_train / total_t))
+                    print("  [timing] per env-step: collect {:.1f} ms | env.step {:.1f} ms  "
+                          "(num_agents={})".format(
+                              1e3 * self._t_collect / n, 1e3 * self._t_envstep / n, self.num_agents))
+                    train_infos["time/collect_frac"] = self._t_collect / total_t
+                    train_infos["time/envstep_frac"] = self._t_envstep / total_t
+                    train_infos["time/train_frac"] = self._t_train / total_t
+                    train_infos["time/collect_ms"] = 1e3 * self._t_collect / n
+                    train_infos["time/envstep_ms"] = 1e3 * self._t_envstep / n
+                self._t_collect = self._t_envstep = self._t_train = 0.0
+                self._timing_steps = 0
 
                 if len(self.env_infos["episode_rewards"]) > 0:
                     episodes_in_interval = len(self.env_infos["episode_rewards"])
