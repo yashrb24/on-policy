@@ -5,10 +5,38 @@ traffic_junction so it slots into env_wrappers.{Dummy,Subproc}VecEnv and the
 shared Runner without bespoke runner/buffer changes.
 """
 
+import os
+import types
+
 import gym
 import numpy as np
 from gym.spaces import Box
 from pettingzoo.sisl import pursuit_v4
+
+
+def _fast_reward(self):
+    """Faster drop-in replacement for PettingZoo's PursuitBase.reward() that
+    returns identical rewards.
+
+    The stock reward() is recomputed on every sub-step (so O(n_pursuers**2) per
+    environment cycle, since the parallel API steps agents one at a time) and is
+    the dominant cost of rollout collection. It only adds, per pursuer,
+    tag_reward * (number of evaders inside the surround window).
+
+    - tag_reward == 0 (the training recipe): the result is all zeros, so we skip
+      the whole computation. Identical by definition (0 * anything == 0).
+    - tag_reward != 0: the same per-pursuer window sums, computed in one vectorized
+      numpy step instead of a Python loop. Same values.
+    """
+    if self.tag_reward == 0:
+        return np.zeros(self.n_pursuers)
+    es = self.evader_layer.get_state_matrix()
+    pos = np.array(
+        [self.pursuer_layer.get_position(i) for i in range(self.n_pursuers)]
+    )  # (N, 2)
+    xs = np.clip(pos[:, 0][:, None] + self.surround_mask[:, 0][None, :], 0, self.x_size - 1)
+    ys = np.clip(pos[:, 1][:, None] + self.surround_mask[:, 1][None, :], 0, self.y_size - 1)
+    return self.tag_reward * es[xs, ys].sum(axis=1)
 
 
 class PursuitEnv(gym.Env):
@@ -31,6 +59,16 @@ class PursuitEnv(gym.Env):
         )
         # Trigger one reset so possible_agents and per-agent spaces are populated.
         self.env.reset()
+
+        # Swap in the faster reward() (see _fast_reward) for this env instance only.
+        # Guarded so we fall back to the stock method if PettingZoo's internals change.
+        # Set PURSUIT_DISABLE_FAST_REWARD=1 to force the original method.
+        if not os.environ.get("PURSUIT_DISABLE_FAST_REWARD"):
+            try:
+                sim = self.env.unwrapped.env
+                sim.reward = types.MethodType(_fast_reward, sim)
+            except AttributeError:
+                pass
 
         self.possible_agents = list(self.env.possible_agents)
         self.num_agents = len(self.possible_agents)
