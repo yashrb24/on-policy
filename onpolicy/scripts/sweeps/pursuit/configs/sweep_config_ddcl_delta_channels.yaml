@@ -7,7 +7,7 @@
 # default the recipe relied on (NOT the 0.5 used by the vanilla sweep), and rewards are
 # the paper-sparse catch 5 / tag 0 / urgency 0 (train_pursuit defaults are 5 / 0.01 / -0.1).
 #
-# DDCL channel is enabled in the ACTOR ONLY (comms_channel_actor_only). Periodic held-out
+# DDCL channel is enabled in the ACTOR ONLY (the critic never uses it). Periodic held-out
 # eval runs 20 stochastic rollouts every 96000 steps (= 8 episodes at 500 x 24 = 12000
 # steps/episode; 100000 is not a multiple of 12000 so the exact-equality trigger would
 # never fire) and logs eval_capture_rate (Capture%) and eval_done_rate/eval_success (Done%).
@@ -94,10 +94,8 @@ parameters:
   pursuit_drop_walls_channel:
     value: true          # obs98 (walls channel hidden)
 
-  # DDCL: channel in the actor only
+  # DDCL: channel in the actor only (the critic never uses it)
   use_comms_channel:
-    value: true
-  comms_channel_actor_only:
     value: true
 
   # Periodic held-out evaluation

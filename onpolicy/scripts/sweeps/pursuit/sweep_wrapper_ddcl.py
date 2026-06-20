@@ -190,9 +190,8 @@ def run_training():
     add_bool_flag(args_list, "--use_transformer_base_critic", True)
     add_bool_flag(args_list, "--pursuit_drop_walls_channel", getattr(config, "pursuit_drop_walls_channel", True))
 
-    # DDCL: learned communication channel in the actor only.
+    # DDCL: learned communication channel in the actor only (the critic never uses it).
     add_bool_flag(args_list, "--use_comms_channel", True)
-    add_bool_flag(args_list, "--comms_channel_actor_only", getattr(config, "comms_channel_actor_only", True))
     args_list.extend(["--channel", str(config.channel)])
     args_list.extend(["--comm_coeff", str(config.comm_coeff)])
 
