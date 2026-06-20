@@ -280,18 +280,13 @@ class R_Critic(nn.Module):
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
         if self.use_transformer_base_critic:
-            # Critic never calculates communication metrics.
-            # Optional asymmetric depth, and optionally drop the DDCL channel from the critic so it
-            # only lives in the actor (the comm-rate penalty already comes from the actor only).
-            critic_args = args
-            change_block = args.critic_n_block is not None and args.critic_n_block != args.n_block
-            drop_comms = getattr(args, "comms_channel_actor_only", False)
-            if change_block or drop_comms:
-                critic_args = copy.copy(args)
-                if change_block:
-                    critic_args.n_block = args.critic_n_block
-                if drop_comms:
-                    critic_args.use_comms_channel = False
+            # Critic never calculates communication metrics, and never uses the DDCL
+            # channel: it only ever lives in the actor (the comm-rate penalty comes from
+            # the actor alone), so the centralized value estimates stay undithered.
+            critic_args = copy.copy(args)
+            if args.critic_n_block is not None and args.critic_n_block != args.n_block:
+                critic_args.n_block = args.critic_n_block   # optional asymmetric depth
+            critic_args.use_comms_channel = False
             self.base = TransformerEncoderBase(critic_args, cent_obs_shape, calc_comm_metrics=False)
         else:
             base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
