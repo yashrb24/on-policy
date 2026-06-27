@@ -14,6 +14,35 @@ class SMACMap(lib.Map):
 
 
 map_param_registry = {
+    # Special micro maps ported from CommFormer (require the matching .SC2Map
+    # files in the SC2 install's Maps/SMAC_Maps/ directory to launch).
+    "1o_10b_vs_1r": {
+        "n_agents": 11,
+        "n_enemies": 1,
+        "limit": 50,
+        "a_race": "Z",
+        "b_race": "Z",
+        "unit_type_bits": 2,
+        "map_type": "overload_bane",
+    },
+    "1o_2r_vs_4r": {
+        "n_agents": 3,
+        "n_enemies": 4,
+        "limit": 50,
+        "a_race": "Z",
+        "b_race": "Z",
+        "unit_type_bits": 2,
+        "map_type": "overload_roach",
+    },
+    "5z_vs_1ul": {
+        "n_agents": 5,
+        "n_enemies": 1,
+        "limit": 150,
+        "a_race": "P",
+        "b_race": "Z",
+        "unit_type_bits": 0,
+        "map_type": "stalkers",
+    },
     "3m": {
         "n_agents": 3,
         "n_enemies": 3,

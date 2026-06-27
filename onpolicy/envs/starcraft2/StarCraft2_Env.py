@@ -1778,7 +1778,18 @@ class StarCraft2Env(MultiAgentEnv):
     def get_unit_type_id(self, unit, ally):
         """Returns the ID of unit type in the given scenario."""
         if ally:  # use new SC2 unit types
-            type_id = unit.unit_type - self._min_unit_type
+            if self.map_type == "overload_roach":
+                if unit.unit_type == 1972:
+                    type_id = 0  # roach
+                elif unit.unit_type == 1971:
+                    type_id = 1  # overload
+            elif self.map_type == "overload_bane":
+                if unit.unit_type == 1971:
+                    type_id = 0  # overload
+                else:
+                    type_id = 1  # baneling
+            else:
+                type_id = unit.unit_type - self._min_unit_type
         else:  # use default SC2 unit types
             if self.map_type == "stalkers_and_zealots":
                 # id(Stalker) = 74, id(Zealot) = 73
@@ -1803,6 +1814,10 @@ class StarCraft2Env(MultiAgentEnv):
                     type_id = 1
                 else:
                     type_id = 2
+            elif self.map_type == "overload_roach":
+                type_id = 0  # roach
+            elif self.map_type == "overload_bane":
+                type_id = 0  # baneling
 
         return type_id
 
