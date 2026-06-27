@@ -221,6 +221,10 @@ def main(args):
         from smacv2.env.starcraft2.maps import get_map_params
         num_agents = parse_smacv2_distribution(all_args)['n_units']
 
+    # Transformer actor/critic reshape uses getattr(args,'num_agents',1); without
+    # this the DDCL attention collapses to a single agent (silent no-op).
+    all_args.num_agents = num_agents
+
     config = {
         "all_args": all_args,
         "envs": envs,
