@@ -143,8 +143,19 @@ class Runner(object):
     def train(self):
         """Train policies with data in buffer. """
         self.trainer.prep_training()
+        # Critic explained variance on this rollout, measured BEFORE trainer.train()
+        # shifts the valuenorm stats. value_preds are stored normalized; returns are
+        # raw (denormalized in compute_returns), so denormalize preds to match.
+        vn = getattr(self.trainer, "value_normalizer", None)
+        y_pred = self.buffer.value_preds[:-1]
+        if vn is not None:
+            y_pred = vn.denormalize(y_pred)
+        y_true = self.buffer.returns[:-1]
+        var_y = np.var(y_true)
+        explained_var = np.nan if var_y == 0 else float(1.0 - np.var(y_true - y_pred) / var_y)
         result = self.trainer.train(self.buffer)
         train_infos, self._delta_info = result
+        train_infos["explained_variance"] = explained_var
         self.buffer.after_update()
         return train_infos
 

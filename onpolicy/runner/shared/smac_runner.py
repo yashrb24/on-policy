@@ -63,6 +63,8 @@ class SMACRunner(Runner):
                                 self.num_env_steps,
                                 int(total_num_steps / (end - start))))
 
+                print("explained variance is {:.4f}.".format(train_infos.get("explained_variance", float("nan"))))
+
                 if self.env_name == "StarCraft2" or self.env_name == "SMACv2" or self.env_name == "SMAC" or self.env_name == "StarCraft2v2":
                     battles_won = []
                     battles_game = []
